@@ -1005,7 +1005,7 @@ and better fit for systems programming.
 
 ## 7. Implementation Plan
 
-### 7.1 Phase 1: MVP (4 weeks)
+### 7.1 Phase 1: MVP (4.5 weeks)
 
 **Goal:** Basic functional filesystem with single origin.
 
@@ -1014,7 +1014,8 @@ and better fit for systems programming.
 | 1 | Project setup, FUSE skeleton, local origin plugin |
 | 2 | Metadata extraction (symphonia), SQLite schema |
 | 3 | Virtual path resolver, tree cache, basic readdir/stat/read |
-| 4 | CAS implementation, chunk caching, integration tests |
+| 4 | CAS implementation, chunk caching, LRU eviction |
+| 4b | Origin→CAS connector (ContentFetcher), cache-miss handling |
 
 **Exit Criteria:**
 - Mount and browse local music library

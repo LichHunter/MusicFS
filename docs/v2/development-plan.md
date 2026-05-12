@@ -64,11 +64,13 @@ musicfs/
 
 ---
 
-## 2. Phase 1: MVP (Weeks 1-4)
+## 2. Phase 1: MVP (Weeks 1-4b)
 
 **Goal**: Basic functional filesystem with single local origin.
 
 **Requirements Covered**: FR-1, FR-2, FR-3, FR-4, FR-5, FR-6, FR-7, FR-8, FR-9, FR-18, NFR-1.1-1.7
+
+**Note**: Week 4b bridges Origin→CAS data flow (cache-miss handling) required for actual file reads.
 
 ---
 
@@ -523,8 +525,55 @@ impl LruEviction {
 
 - [ ] Chunks stored in CAS with deduplication
 - [ ] Cache size limit enforced via eviction
-- [ ] Audio playback works through mounted filesystem
 - [ ] Cache persists across daemon restarts
+
+**Note**: Audio playback requires Week 4b (Origin→CAS connector).
+
+---
+
+### Week 4b: Origin-CAS Connector
+
+**Detailed plan**: See `plans/week-04b-origin-connector.md`
+
+#### Summary
+
+Bridges the gap between Origin (source files) and CAS (chunk cache). Without this, FUSE read() cannot return actual file content.
+
+#### Deliverables
+
+| Task | Crate | Files | Requirements |
+|------|-------|-------|--------------|
+| ContentFetcher | musicfs-cas | `fetcher.rs` | FR-3.2 |
+| Cache-miss handling | musicfs-cas | `reader.rs` | FR-3.2 |
+| FUSE integration | musicfs-fuse | `filesystem.rs` | FR-3.1-3.2 |
+
+#### Key Components
+
+```rust
+pub struct ContentFetcher {
+    store: Arc<CasStore>,
+    origins: HashMap<OriginId, Arc<dyn Origin>>,
+    file_meta: HashMap<FileId, FileMeta>,
+}
+
+impl ContentFetcher {
+    /// Fetch file from origin, store in CAS, return manifest
+    pub async fn fetch_file(&self, file_id: FileId) -> Result<ChunkManifest>;
+}
+```
+
+#### Tests
+
+| Test | Type | Validates |
+|------|------|-----------|
+| `test_fetch_file` | Unit | Origin → CAS works |
+| `test_reader_cache_miss` | Unit | Fetcher called on miss |
+| `test_e2e_cat_file` | E2E | `cat` returns content |
+
+#### Exit Criteria
+
+- [ ] `cat /mnt/musicfs/Artist/Album/track.flac` returns actual data
+- [ ] Audio playback works through mounted filesystem
 - [ ] All Phase 1 requirements pass acceptance tests
 
 ---
