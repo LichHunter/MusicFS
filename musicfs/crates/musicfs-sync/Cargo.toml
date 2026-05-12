@@ -1,0 +1,6 @@
+[package]
+name = "musicfs-sync"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

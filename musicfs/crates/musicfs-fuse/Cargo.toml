@@ -1,0 +1,11 @@
+[package]
+name = "musicfs-fuse"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+musicfs-core = { path = "../musicfs-core" }
+fuser.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+libc = "0.2"

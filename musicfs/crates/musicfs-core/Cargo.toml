@@ -1,0 +1,11 @@
+[package]
+name = "musicfs-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+xxhash-rust.workspace = true
+hex = "0.4"

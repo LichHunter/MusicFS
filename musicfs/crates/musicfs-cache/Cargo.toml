@@ -1,0 +1,6 @@
+[package]
+name = "musicfs-cache"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

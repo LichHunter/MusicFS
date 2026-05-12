@@ -1,0 +1,10 @@
+[package]
+name = "musicfs-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "musicfs"
+path = "src/main.rs"
+
+[dependencies]

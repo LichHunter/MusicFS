@@ -1,0 +1,6 @@
+[package]
+name = "musicfs-metadata"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

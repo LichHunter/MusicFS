@@ -1,0 +1,42 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.75"
+authors = ["MusicFS Contributors"]
+repository = "https://github.com/user/musicfs"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rmp-serde = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# FUSE
+fuser = "0.14"
+
+# Database
+rusqlite = { version = "0.31", features = ["bundled"] }
+sled = "0.34"
+
+# Hashing (per architecture 8.3)
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
+
+# Testing
+tempfile = "3"
