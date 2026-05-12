@@ -66,8 +66,28 @@ impl ChunkHash {
         Self(xxh64(data, 0).to_le_bytes())
     }
 
-    pub fn to_hex(&self) -> String {
+    pub fn as_hex(&self) -> String {
         hex::encode(self.0)
+    }
+
+    pub fn to_hex(&self) -> String {
+        self.as_hex()
+    }
+
+    pub fn from_hex(s: &str) -> Option<Self> {
+        let bytes = hex::decode(s).ok()?;
+        if bytes.len() != 8 {
+            return None;
+        }
+        let mut arr = [0u8; 8];
+        arr.copy_from_slice(&bytes);
+        Some(Self(arr))
+    }
+}
+
+impl std::fmt::Display for ChunkHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_hex())
     }
 }
 

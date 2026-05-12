@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 musicfs-core = { path = "../musicfs-core" }
+musicfs-cas = { path = "../musicfs-cas" }
 rusqlite = { workspace = true, features = ["bundled"] }
 sled.workspace = true
 tokio.workspace = true

@@ -3,18 +3,20 @@ use fuser::{
     Request,
 };
 use musicfs_cache::{VirtualNode, VirtualTree, ROOT_INODE};
+use musicfs_cas::FileReader;
 use musicfs_core::Result;
 use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 const TTL: Duration = Duration::from_secs(1);
 const BLOCK_SIZE: u32 = 512;
 
 pub struct MusicFs {
     tree: Arc<RwLock<VirtualTree>>,
+    reader: Option<Arc<FileReader>>,
     uid: u32,
     gid: u32,
 }
@@ -23,6 +25,16 @@ impl MusicFs {
     pub fn new(tree: Arc<RwLock<VirtualTree>>) -> Self {
         Self {
             tree,
+            reader: None,
+            uid: unsafe { libc::getuid() },
+            gid: unsafe { libc::getgid() },
+        }
+    }
+
+    pub fn with_reader(tree: Arc<RwLock<VirtualTree>>, reader: Arc<FileReader>) -> Self {
+        Self {
+            tree,
+            reader: Some(reader),
             uid: unsafe { libc::getuid() },
             gid: unsafe { libc::getgid() },
         }
@@ -213,12 +225,32 @@ impl Filesystem for MusicFs {
     ) {
         debug!("read(ino={}, offset={}, size={})", ino, offset, size);
 
-        let tree = self.tree.read().unwrap();
+        let file_id = {
+            let tree = self.tree.read().unwrap();
+            if let Some(VirtualNode::File(file)) = tree.get(ino) {
+                file.file_id
+            } else {
+                reply.error(libc::ENOENT);
+                return;
+            }
+        };
 
-        if let Some(VirtualNode::File(_file)) = tree.get(ino) {
+        let Some(reader) = &self.reader else {
             reply.data(&[]);
-        } else {
-            reply.error(libc::ENOENT);
+            return;
+        };
+
+        let reader = reader.clone();
+        let result = tokio::runtime::Handle::current().block_on(async {
+            reader.read(file_id, offset as u64, size).await
+        });
+
+        match result {
+            Ok(data) => reply.data(&data),
+            Err(e) => {
+                warn!("Read error: {}", e);
+                reply.error(libc::EIO);
+            }
         }
     }
 

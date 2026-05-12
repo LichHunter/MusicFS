@@ -4,3 +4,18 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+musicfs-core = { path = "../musicfs-core" }
+tokio.workspace = true
+tracing.workspace = true
+serde.workspace = true
+sled.workspace = true
+xxhash-rust.workspace = true
+bytes.workspace = true
+rmp-serde.workspace = true
+hex.workspace = true
+dirs.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+musicfs-cache = { path = "../musicfs-cache" }
