@@ -1,0 +1,75 @@
+{
+  "timestamp": "2026-05-12T14:42:37.343765", 
+  "results": [
+    {
+      "mean_ms": null, 
+      "runs": 0, 
+      "name": "mount_time", 
+      "memory_kb": null, 
+      "error": "Mount process died: Traceback (most recent call last):\n  File \"/tmp/nix-shell.VlFHpy/nix-shell.rhvctI/beetfs_bench_JfIl36/mount.py\", line 40, in <module>\n    beetFs.directory_structure.adddir(sub_elements, level_subbed[level])\n  File \"/home/fujin/Code/agregators/music-agregator/beetfs/beetsplug/beetFs.py\", line 414, in adddir\n    node = self.getnode(elements, root=root)\n  File \"/home/fujin/Code/agregators/music-agregator/beetfs/beetsplug/beetFs.py\", line 403, in getnode\n    return self.getnode(elements, root=root.dirs[topdir])\nKeyError: u'Bench Artist'\n", 
+      "min_ms": null, 
+      "metadata": {}, 
+      "max_ms": null
+    }, 
+    {
+      "mean_ms": null, 
+      "runs": 0, 
+      "name": "readdir", 
+      "memory_kb": null, 
+      "error": "Mount process died: Traceback (most recent call last):\n  File \"/tmp/nix-shell.VlFHpy/nix-shell.rhvctI/beetfs_bench_JfIl36/mount.py\", line 40, in <module>\n    beetFs.directory_structure.adddir(sub_elements, level_subbed[level])\n  File \"/home/fujin/Code/agregators/music-agregator/beetfs/beetsplug/beetFs.py\", line 414, in adddir\n    node = self.getnode(elements, root=root)\n  File \"/home/fujin/Code/agregators/music-agregator/beetfs/beetsplug/beetFs.py\", line 403, in getnode\n    return self.getnode(elements, root=root.dirs[topdir])\nKeyError: u'Bench Artist'\n", 
+      "min_ms": null, 
+      "metadata": {}, 
+      "max_ms": null
+    }, 
+    {
+      "mean_ms": null, 
+      "runs": 0, 
+      "name": "stat_latency", 
+      "memory_kb": null, 
+      "error": "Mount process died: Traceback (most recent call last):\n  File \"/tmp/nix-shell.VlFHpy/nix-shell.rhvctI/beetfs_bench_JfIl36/mount.py\", line 40, in <module>\n    beetFs.directory_structure.adddir(sub_elements, level_subbed[level])\n  File \"/home/fujin/Code/agregators/music-agregator/beetfs/beetsplug/beetFs.py\", line 414, in adddir\n    node = self.getnode(elements, root=root)\n  File \"/home/fujin/Code/agregators/music-agregator/beetfs/beetsplug/beetFs.py\", line 403, in getnode\n    return self.getnode(elements, root=root.dirs[topdir])\nKeyError: u'Bench Artist'\n", 
+      "min_ms": null, 
+      "metadata": {}, 
+      "max_ms": null
+    }, 
+    {
+      "mean_ms": null, 
+      "runs": 0, 
+      "name": "enoent_lookup", 
+      "memory_kb": null, 
+      "error": "Mount process died: Traceback (most recent call last):\n  File \"/tmp/nix-shell.VlFHpy/nix-shell.rhvctI/beetfs_bench_JfIl36/mount.py\", line 40, in <module>\n    beetFs.directory_structure.adddir(sub_elements, level_subbed[level])\n  File \"/home/fujin/Code/agregators/music-agregator/beetfs/beetsplug/beetFs.py\", line 414, in adddir\n    node = self.getnode(elements, root=root)\n  File \"/home/fujin/Code/agregators/music-agregator/beetfs/beetsplug/beetFs.py\", line 403, in getnode\n    return self.getnode(elements, root=root.dirs[topdir])\nKeyError: u'Bench Artist'\n", 
+      "min_ms": null, 
+      "metadata": {}, 
+      "max_ms": null
+    }, 
+    {
+      "mean_ms": null, 
+      "runs": 0, 
+      "name": "file_open", 
+      "memory_kb": null, 
+      "error": "Mount process died: Traceback (most recent call last):\n  File \"/tmp/nix-shell.VlFHpy/nix-shell.rhvctI/beetfs_bench_JfIl36/mount.py\", line 40, in <module>\n    beetFs.directory_structure.adddir(sub_elements, level_subbed[level])\n  File \"/home/fujin/Code/agregators/music-agregator/beetfs/beetsplug/beetFs.py\", line 414, in adddir\n    node = self.getnode(elements, root=root)\n  File \"/home/fujin/Code/agregators/music-agregator/beetfs/beetsplug/beetFs.py\", line 403, in getnode\n    return self.getnode(elements, root=root.dirs[topdir])\nKeyError: u'Bench Artist'\n", 
+      "min_ms": null, 
+      "metadata": {}, 
+      "max_ms": null
+    }, 
+    {
+      "mean_ms": null, 
+      "runs": 0, 
+      "name": "read_throughput", 
+      "memory_kb": null, 
+      "error": "Mount process died: Traceback (most recent call last):\n  File \"/tmp/nix-shell.VlFHpy/nix-shell.rhvctI/beetfs_bench_JfIl36/mount.py\", line 40, in <module>\n    beetFs.directory_structure.adddir(sub_elements, level_subbed[level])\n  File \"/home/fujin/Code/agregators/music-agregator/beetfs/beetsplug/beetFs.py\", line 414, in adddir\n    node = self.getnode(elements, root=root)\n  File \"/home/fujin/Code/agregators/music-agregator/beetfs/beetsplug/beetFs.py\", line 403, in getnode\n    return self.getnode(elements, root=root.dirs[topdir])\nKeyError: u'Bench Artist'\n", 
+      "min_ms": null, 
+      "metadata": {}, 
+      "max_ms": null
+    }, 
+    {
+      "mean_ms": null, 
+      "runs": 0, 
+      "name": "memory_usage", 
+      "memory_kb": null, 
+      "error": "Mount process died: Traceback (most recent call last):\n  File \"/tmp/nix-shell.VlFHpy/nix-shell.rhvctI/beetfs_bench_JfIl36/mount.py\", line 40, in <module>\n    beetFs.directory_structure.adddir(sub_elements, level_subbed[level])\n  File \"/home/fujin/Code/agregators/music-agregator/beetfs/beetsplug/beetFs.py\", line 414, in adddir\n    node = self.getnode(elements, root=root)\n  File \"/home/fujin/Code/agregators/music-agregator/beetfs/beetsplug/beetFs.py\", line 403, in getnode\n    return self.getnode(elements, root=root.dirs[topdir])\nKeyError: u'Bench Artist'\n", 
+      "min_ms": null, 
+      "metadata": {}, 
+      "max_ms": null
+    }
+  ]
+}
