@@ -7,7 +7,13 @@ edition.workspace = true
 musicfs-core = { path = "../musicfs-core" }
 musicfs-cache = { path = "../musicfs-cache" }
 musicfs-cas = { path = "../musicfs-cas" }
+musicfs-search = { path = "../musicfs-search" }
 fuser.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+moka.workspace = true
+parking_lot.workspace = true
 libc = "0.2"
+
+[dev-dependencies]
+tempfile.workspace = true

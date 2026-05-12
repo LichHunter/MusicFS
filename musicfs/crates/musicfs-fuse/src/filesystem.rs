@@ -1,3 +1,4 @@
+use crate::ops::SearchOps;
 use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, ReplyOpen,
     Request,
@@ -5,6 +6,7 @@ use fuser::{
 use musicfs_cache::{VirtualNode, VirtualTree, ROOT_INODE};
 use musicfs_cas::FileReader;
 use musicfs_core::Result;
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
@@ -14,11 +16,16 @@ use tracing::{debug, info, warn};
 
 const TTL: Duration = Duration::from_secs(1);
 const BLOCK_SIZE: u32 = 512;
+const SEARCH_QUERY_INODE_BASE: u64 = 0xFFFF_FFFF_0000_0100;
 
 pub struct MusicFs {
     tree: Arc<RwLock<VirtualTree>>,
     reader: Option<Arc<FileReader>>,
     runtime_handle: Handle,
+    search_ops: Option<SearchOps>,
+    query_inodes: RwLock<HashMap<String, u64>>,
+    inode_queries: RwLock<HashMap<u64, String>>,
+    next_query_inode: RwLock<u64>,
     uid: u32,
     gid: u32,
 }
@@ -29,6 +36,10 @@ impl MusicFs {
             tree,
             reader: None,
             runtime_handle,
+            search_ops: None,
+            query_inodes: RwLock::new(HashMap::new()),
+            inode_queries: RwLock::new(HashMap::new()),
+            next_query_inode: RwLock::new(SEARCH_QUERY_INODE_BASE),
             uid: unsafe { libc::getuid() },
             gid: unsafe { libc::getgid() },
         }
@@ -39,9 +50,44 @@ impl MusicFs {
             tree,
             reader: Some(reader),
             runtime_handle,
+            search_ops: None,
+            query_inodes: RwLock::new(HashMap::new()),
+            inode_queries: RwLock::new(HashMap::new()),
+            next_query_inode: RwLock::new(SEARCH_QUERY_INODE_BASE),
             uid: unsafe { libc::getuid() },
             gid: unsafe { libc::getgid() },
         }
+    }
+
+    pub fn with_search(mut self, search_ops: SearchOps) -> Self {
+        self.search_ops = Some(search_ops);
+        self
+    }
+
+    fn get_or_create_query_inode(&self, query: &str) -> u64 {
+        let query_inodes = self.query_inodes.read().unwrap();
+        if let Some(&inode) = query_inodes.get(query) {
+            return inode;
+        }
+        drop(query_inodes);
+
+        let mut query_inodes = self.query_inodes.write().unwrap();
+        let mut inode_queries = self.inode_queries.write().unwrap();
+        let mut next_inode = self.next_query_inode.write().unwrap();
+
+        if let Some(&inode) = query_inodes.get(query) {
+            return inode;
+        }
+
+        let inode = *next_inode;
+        *next_inode += 1;
+        query_inodes.insert(query.to_string(), inode);
+        inode_queries.insert(inode, query.to_string());
+        inode
+    }
+
+    fn get_query_for_inode(&self, inode: u64) -> Option<String> {
+        self.inode_queries.read().unwrap().get(&inode).cloned()
     }
 
     pub fn mount(self, mountpoint: &Path) -> Result<()> {
@@ -116,6 +162,31 @@ impl Filesystem for MusicFs {
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
         debug!("lookup(parent={}, name={:?})", parent, name);
 
+        let name_str = name.to_string_lossy();
+
+        if parent == ROOT_INODE && SearchOps::is_search_dir_name(&name_str) {
+            if let Some(ref search_ops) = self.search_ops {
+                search_ops.lookup_search_dir(reply);
+                return;
+            }
+        }
+
+        if parent == SearchOps::search_dir_inode() {
+            if let Some(ref search_ops) = self.search_ops {
+                let inode = self.get_or_create_query_inode(&name_str);
+                search_ops.lookup_query_dir(&name_str, inode, reply);
+                return;
+            }
+        }
+
+        if let Some(query) = self.get_query_for_inode(parent) {
+            if let Some(ref search_ops) = self.search_ops {
+                let inode = self.get_or_create_query_inode(&format!("{}:{}", query, name_str));
+                search_ops.lookup_result(inode, reply);
+                return;
+            }
+        }
+
         let tree = self.tree.read().unwrap();
 
         if let Some(inode) = tree.lookup(parent, name) {
@@ -131,6 +202,27 @@ impl Filesystem for MusicFs {
 
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
         debug!("getattr(ino={})", ino);
+
+        if ino == SearchOps::search_dir_inode() {
+            if let Some(ref search_ops) = self.search_ops {
+                search_ops.getattr_search_dir(reply);
+                return;
+            }
+        }
+
+        if SearchOps::is_search_inode(ino) {
+            if let Some(ref search_ops) = self.search_ops {
+                search_ops.getattr_result(ino, reply);
+                return;
+            }
+        }
+
+        if self.get_query_for_inode(ino).is_some() {
+            if let Some(ref search_ops) = self.search_ops {
+                search_ops.getattr_search_dir(reply);
+                return;
+            }
+        }
 
         let tree = self.tree.read().unwrap();
 
@@ -151,6 +243,20 @@ impl Filesystem for MusicFs {
         mut reply: ReplyDirectory,
     ) {
         debug!("readdir(ino={}, offset={})", ino, offset);
+
+        if ino == SearchOps::search_dir_inode() {
+            if let Some(ref search_ops) = self.search_ops {
+                search_ops.readdir_search_root(offset, reply);
+                return;
+            }
+        }
+
+        if let Some(query) = self.get_query_for_inode(ino) {
+            if let Some(ref search_ops) = self.search_ops {
+                search_ops.readdir_query(&query, offset, reply);
+                return;
+            }
+        }
 
         let tree = self.tree.read().unwrap();
 
@@ -273,6 +379,19 @@ impl Filesystem for MusicFs {
     ) {
         debug!("release(ino={})", ino);
         reply.ok();
+    }
+
+    fn readlink(&mut self, _req: &Request, ino: u64, reply: ReplyData) {
+        debug!("readlink(ino={})", ino);
+
+        if SearchOps::is_search_inode(ino) {
+            if let Some(ref search_ops) = self.search_ops {
+                search_ops.readlink(ino, reply);
+                return;
+            }
+        }
+
+        reply.error(libc::EINVAL);
     }
 
     fn write(
