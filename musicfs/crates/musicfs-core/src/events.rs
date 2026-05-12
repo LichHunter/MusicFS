@@ -60,6 +60,13 @@ pub enum Event {
     CacheEviction {
         bytes_freed: u64,
     },
+    AllOriginsUnhealthy {
+        candidate_count: usize,
+    },
+    OriginHealthChanged {
+        origin_id: OriginId,
+        healthy: bool,
+    },
 }
 
 #[cfg(test)]

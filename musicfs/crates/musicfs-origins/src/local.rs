@@ -1,6 +1,6 @@
-use crate::traits::{Origin, OriginType, WatchCallback, WatchHandle};
+use crate::traits::{Origin, WatchCallback, WatchHandle};
 use async_trait::async_trait;
-use musicfs_core::{DirEntry, FileStat, HealthStatus, OriginId, Result};
+use musicfs_core::{DirEntry, FileStat, HealthStatus, OriginId, OriginType, Result};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::AsyncRead;

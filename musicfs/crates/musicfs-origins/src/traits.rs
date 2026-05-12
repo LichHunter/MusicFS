@@ -1,16 +1,7 @@
 use async_trait::async_trait;
-use musicfs_core::{DirEntry, FileStat, HealthStatus, OriginId, Result};
+use musicfs_core::{DirEntry, FileStat, HealthStatus, OriginId, OriginType, Result};
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncRead;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OriginType {
-    Local,
-    Nfs,
-    Smb,
-    S3,
-    Sftp,
-}
 
 #[async_trait]
 pub trait Origin: Send + Sync {

@@ -6,7 +6,8 @@ edition.workspace = true
 [dependencies]
 musicfs-core = { path = "../musicfs-core" }
 async-trait.workspace = true
-tokio = { workspace = true, features = ["fs", "sync"] }
+dashmap.workspace = true
+tokio = { workspace = true, features = ["fs", "sync", "time"] }
 tracing.workspace = true
 
 [dev-dependencies]

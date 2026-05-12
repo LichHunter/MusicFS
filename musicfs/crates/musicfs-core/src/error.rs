@@ -28,6 +28,15 @@ pub enum Error {
 
     #[error("Operation not permitted (read-only filesystem)")]
     ReadOnly,
+
+    #[error("No origin available to serve request")]
+    NoOriginAvailable,
+
+    #[error("Maximum retries exceeded")]
+    MaxRetriesExceeded,
+
+    #[error("Origin error: {0}")]
+    Origin(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
