@@ -8,3 +8,16 @@ name = "musicfs"
 path = "src/main.rs"
 
 [dependencies]
+musicfs-core.path = "../musicfs-core"
+musicfs-origins.path = "../musicfs-origins"
+musicfs-cache.path = "../musicfs-cache"
+musicfs-cas.path = "../musicfs-cas"
+musicfs-fuse.path = "../musicfs-fuse"
+musicfs-metadata.path = "../musicfs-metadata"
+
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+dirs.workspace = true

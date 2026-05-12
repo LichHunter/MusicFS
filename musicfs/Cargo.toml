@@ -50,5 +50,8 @@ bytes = "1"
 # Platform directories
 dirs = "5"
 
+# CLI
+clap = { version = "4", features = ["derive"] }
+
 # Testing
 tempfile = "3"

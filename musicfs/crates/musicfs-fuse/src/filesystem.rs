@@ -9,6 +9,7 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
+use tokio::runtime::Handle;
 use tracing::{debug, info, warn};
 
 const TTL: Duration = Duration::from_secs(1);
@@ -17,24 +18,27 @@ const BLOCK_SIZE: u32 = 512;
 pub struct MusicFs {
     tree: Arc<RwLock<VirtualTree>>,
     reader: Option<Arc<FileReader>>,
+    runtime_handle: Handle,
     uid: u32,
     gid: u32,
 }
 
 impl MusicFs {
-    pub fn new(tree: Arc<RwLock<VirtualTree>>) -> Self {
+    pub fn new(tree: Arc<RwLock<VirtualTree>>, runtime_handle: Handle) -> Self {
         Self {
             tree,
             reader: None,
+            runtime_handle,
             uid: unsafe { libc::getuid() },
             gid: unsafe { libc::getgid() },
         }
     }
 
-    pub fn with_reader(tree: Arc<RwLock<VirtualTree>>, reader: Arc<FileReader>) -> Self {
+    pub fn with_reader(tree: Arc<RwLock<VirtualTree>>, reader: Arc<FileReader>, runtime_handle: Handle) -> Self {
         Self {
             tree,
             reader: Some(reader),
+            runtime_handle,
             uid: unsafe { libc::getuid() },
             gid: unsafe { libc::getgid() },
         }
@@ -241,8 +245,11 @@ impl Filesystem for MusicFs {
         };
 
         let reader = reader.clone();
-        let result = tokio::runtime::Handle::current().block_on(async {
-            reader.read(file_id, offset as u64, size).await
+        let handle = self.runtime_handle.clone();
+        let result = std::thread::scope(|_| {
+            handle.block_on(async {
+                reader.read(file_id, offset as u64, size).await
+            })
         });
 
         match result {
@@ -410,11 +417,14 @@ mod tests {
 
     #[test]
     fn test_tree_integration() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let handle = runtime.handle().clone();
+        
         let mut builder = TreeBuilder::new();
         builder.add_file(&make_file_meta(1, "/Artist/Album/Track.flac", 30_000_000));
         let tree = Arc::new(RwLock::new(builder.build()));
 
-        let _fs = MusicFs::new(tree.clone());
+        let _fs = MusicFs::new(tree.clone(), handle);
 
         let tree_read = tree.read().unwrap();
         assert!(tree_read.get(ROOT_INODE).is_some());

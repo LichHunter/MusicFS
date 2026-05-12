@@ -18,7 +18,7 @@
         };
       in
       {
-        devShells.default = pkgs.mkShell {
+        devShells.default = pkgs.mkShell rec {
           buildInputs = with pkgs; [
             rustToolchain
             pkg-config
@@ -26,20 +26,18 @@
             sqlite
             openssl
             
-            # Linker toolchain
             clang
             lld
             
-            # Dev tools
             cargo-watch
             cargo-nextest
             cargo-criterion
             
-            # gRPC tooling (Week 10+)
             protobuf
             grpcurl
           ];
           
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath buildInputs;
           RUST_BACKTRACE = "1";
           RUST_LOG = "debug";
         };
