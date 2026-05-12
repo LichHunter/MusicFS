@@ -122,7 +122,7 @@ impl OriginWatcher {
                 }
                 EventKind::Remove(_) => {
                     debug!("File removed: {:?}", relative);
-                    event_bus.publish(Event::FileRemoved { path: vpath });
+                    event_bus.publish(Event::FileRemoved { path: vpath, file_id: None });
                 }
                 EventKind::Modify(_) => {
                     debug!("File modified: {:?}", relative);
