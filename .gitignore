@@ -1,0 +1,17 @@
+# Python bytecode
+*.pyc
+*.pyo
+__pycache__/
+
+# Test artifacts
+tests/LOG
+tests/*.log
+
+# Editor
+*.swp
+*.swo
+*~
+
+# Nix
+result
+result-*

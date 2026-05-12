@@ -338,64 +338,79 @@ class BeetFSTestCase(unittest.TestCase):
         env = os.environ.copy()
         env['BEETSDIR'] = self.library.temp_dir
         
-        cmd = [
-            sys.executable,  # Python interpreter
-            '-c',
-            '''
+        mount_script = '''
 import sys
 sys.path.insert(0, "{beetfs_root}")
 sys.path.insert(0, "{beetsplug}")
 
 import os
+import re
 os.environ["BEETSDIR"] = "{beetsdir}"
 
 from beets import config
 from beets.library import Library
 
-# Load our test config
 config.read(user=False)
 config["directory"] = "{music_dir}"
 config["library"] = "{db_path}"
 
-# Open library
 lib = Library("{db_path}")
 
-# Import and run beetfs
-from beetFs import beetFileSystem
+import beetFs
 import fuse
 
 fuse.fuse_python_api = (0, 2)
-fs = beetFileSystem(
-    version="%prog " + fuse.__version__,
-    usage="Test mount",
-    dash_s_do='setsingle'
-)
-fs.parse(errex=1)
-fs.flags = 0
-fs.multithreaded = False
 
-# Set global library reference
-import beetFs
 beetFs.library = lib
+beetFs.structure_depth = 4
+beetFs.structure_split = [0, 1, 2, 3]
+beetFs.directory_structure = beetFs.FSNode({{}}, {{}})
 
-# Build directory structure
-from beetFs import directory_structure, template_mapping
 for item in lib.items():
     mapping = beetFs.template_mapping(lib, item)
-    
+    path_str = beetFs.PATH_FORMAT
+    for key, val in mapping.items():
+        if val is not None:
+            clean_val = re.sub(r"[\\\\/:]|^\\.", "_", unicode(val))
+            path_str = path_str.replace("$" + key, clean_val)
+    elements = path_str.split("/")
+    sub_elements = elements[0:beetFs.structure_depth-1]
+    for level in range(len(sub_elements)):
+        level_subbed = sub_elements[0:level+1]
+        beetFs.directory_structure.adddir(sub_elements, level_subbed[level])
+    beetFs.directory_structure.addfile(
+        sub_elements,
+        elements[beetFs.structure_depth-1],
+        item.id
+    )
+
+fs = beetFs.beetFileSystem(
+    version="%prog " + fuse.__version__,
+    usage="beetfs test mount",
+    dash_s_do="setsingle"
+)
+
+fs.parser.add_option(mountopt="root", metavar="PATH", default="{music_dir}",
+                     help="music library root path")
+fs.parse(args=["{mount_dir}"], errex=1)
+fs.flags = 0
+fs.multithreaded = False
+fs.fuse_args.setmod("foreground")
+fs.fuse_args.add("fsname=beetfs")
+fs.fuse_args.add("nonempty")
+fs.lib = lib
+
 fs.main()
 '''.format(
-                beetfs_root=BEETFS_ROOT,
-                beetsplug=os.path.join(BEETFS_ROOT, 'beetsplug'),
-                beetsdir=self.library.temp_dir,
-                music_dir=self.library.music_dir,
-                db_path=self.library.db_path
-            ),
-            self.mount_dir
-        ]
+            beetfs_root=BEETFS_ROOT,
+            beetsplug=os.path.join(BEETFS_ROOT, 'beetsplug'),
+            beetsdir=self.library.temp_dir,
+            music_dir=self.library.music_dir,
+            db_path=self.library.db_path,
+            mount_dir=self.mount_dir
+        )
         
-        if foreground:
-            cmd.insert(-1, '-f')
+        cmd = [sys.executable, '-c', mount_script]
         
         # Start process
         self.fs_process = subprocess.Popen(

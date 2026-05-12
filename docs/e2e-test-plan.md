@@ -2,6 +2,36 @@
 
 > **Reviewed by Oracle** - Critical bug discovered, plan updated accordingly
 
+## Test Results (Latest Run)
+
+```
+Tests run:   74
+Passed:      12
+Failures:    56
+Errors:       3
+Skipped:      3
+Duration:    ~103 seconds
+```
+
+### Bugs Detected by Tests
+
+| Bug | Tests Affected | Description |
+|-----|----------------|-------------|
+| **Nested Methods** | 56 | Lines 758-1144 indented inside `access()` - FUSE operations unreachable |
+| **Directory Tree Building** | 3 | `KeyError` in `FSNode.getnode()` when adding files |
+| **Unmount** | 1 | Filesystem not unmounting cleanly |
+
+### Passing Tests (12)
+
+- `test_fuse_available` - FUSE/fusermount detected
+- `test_library_fixture_created` - SQLite DB and music dir created
+- `test_temp_directory_created` - Temp dirs set up correctly
+- `test_mount_empty_library` - **Mount works with empty library!**
+- `test_list_empty_root` - Empty root returns empty list
+- `test_list_root_returns_list` - Returns list type
+- `test_access_empty_path` - Handles empty path
+- Plus 5 nested bug detection tests (confirming bug exists)
+
 ## Executive Summary
 
 E2E tests for beetfs FUSE filesystem using real music files from qBittorrent container. No mocks - actual filesystem operations against mounted beetfs.
@@ -402,6 +432,55 @@ pkgs.flac      # For FLAC encoding
 4. **Writes update DB** - Metadata changes persist
 5. **Errors handled gracefully** - Correct errno for unsupported ops
 6. **No crashes on edge cases** - Unicode, special chars, concurrent access
+
+---
+
+## Findings from Test Execution
+
+### Bug #1: Nested Methods (CRITICAL)
+
+**Location**: `beetFs.py` lines 758-1144
+
+**Problem**: All FUSE operation methods are indented inside the `access()` method, making them local functions instead of class methods.
+
+**Evidence**:
+```python
+def access(self, path, flags):   # Line 723 - correct class method
+    ...
+    return 0
+
+    def readdir(self, path, ...):  # Line 931 - WRONG! Nested inside access()
+        ...
+    def open(self, path, flags):   # Line 988 - Also nested
+        ...
+    def read(self, path, ...):     # Line 1077 - Also nested
+        ...
+```
+
+**Symptom**: `os.listdir()` returns `OSError: [Errno 38] Function not implemented`
+
+**Fix Required**: Dedent lines 758-1144 by 8 spaces to make them class methods.
+
+### Bug #2: Directory Tree Building
+
+**Location**: `beetFs.py` lines 403-414 (`FSNode.getnode()` and `FSNode.adddir()`)
+
+**Problem**: When adding files to the directory structure, the code assumes parent directories already exist.
+
+**Evidence**:
+```
+KeyError: u'Test Artist'
+File "beetFs.py", line 403, in getnode
+    return self.getnode(elements, root=root.dirs[topdir])
+```
+
+**Symptom**: Mount fails when library contains tracks.
+
+### Bug #3: Unmount Not Clean
+
+**Problem**: After unmounting, `os.path.ismount()` still returns `True`.
+
+**Likely Cause**: FUSE process not terminating properly, or lazy unmount not completing.
 
 ---
 
