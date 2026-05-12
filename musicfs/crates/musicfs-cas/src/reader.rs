@@ -1,10 +1,11 @@
 use crate::chunks::ChunkRef;
+use crate::fetcher::{ContentFetcher, FetchError};
 use crate::store::CasStore;
 use bytes::{Bytes, BytesMut};
 use musicfs_core::FileId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkManifest {
@@ -33,14 +34,24 @@ impl ChunkManifest {
 }
 
 pub struct FileReader {
-    store: std::sync::Arc<CasStore>,
+    store: Arc<CasStore>,
+    fetcher: Option<Arc<ContentFetcher>>,
     manifests: RwLock<HashMap<FileId, ChunkManifest>>,
 }
 
 impl FileReader {
-    pub fn new(store: std::sync::Arc<CasStore>) -> Self {
+    pub fn new(store: Arc<CasStore>) -> Self {
         Self {
             store,
+            fetcher: None,
+            manifests: RwLock::new(HashMap::new()),
+        }
+    }
+
+    pub fn with_fetcher(store: Arc<CasStore>, fetcher: Arc<ContentFetcher>) -> Self {
+        Self {
+            store,
+            fetcher: Some(fetcher),
             manifests: RwLock::new(HashMap::new()),
         }
     }
@@ -50,19 +61,39 @@ impl FileReader {
         manifests.insert(manifest.file_id, manifest);
     }
 
+    async fn get_or_fetch_manifest(&self, file_id: FileId) -> Result<ChunkManifest, ReaderError> {
+        {
+            let manifests = self.manifests.read().unwrap();
+            if let Some(m) = manifests.get(&file_id) {
+                return Ok(m.clone());
+            }
+        }
+
+        let Some(fetcher) = &self.fetcher else {
+            return Err(ReaderError::ManifestNotFound(file_id));
+        };
+
+        let manifest = fetcher.ensure_cached(file_id).await?;
+        self.manifests
+            .write()
+            .unwrap()
+            .insert(file_id, manifest.clone());
+        Ok(manifest)
+    }
+
     pub async fn read(
         &self,
         file_id: FileId,
         offset: u64,
         size: u32,
     ) -> Result<Bytes, ReaderError> {
-        let manifest = {
-            let manifests = self.manifests.read().unwrap();
-            manifests
-                .get(&file_id)
-                .cloned()
-                .ok_or(ReaderError::ManifestNotFound(file_id))?
-        };
+        let manifest = self.get_or_fetch_manifest(file_id).await?;
+
+        if let Some(fetcher) = &self.fetcher {
+            if let Some(meta) = fetcher.get_file_meta(file_id) {
+                fetcher.emit_access_event(&meta, offset, size);
+            }
+        }
 
         if offset >= manifest.total_size {
             return Ok(Bytes::new());
@@ -105,6 +136,9 @@ pub enum ReaderError {
     #[error("Manifest not found for file {0:?}")]
     ManifestNotFound(FileId),
 
+    #[error("Fetch error: {0}")]
+    Fetch(#[from] FetchError),
+
     #[error("CAS error: {0}")]
     Cas(#[from] crate::store::CasError),
 }
@@ -123,7 +157,7 @@ mod tests {
             chunks_dir: dir.path().join("chunks"),
             ..Default::default()
         };
-        let store = std::sync::Arc::new(CasStore::open(config).await.unwrap());
+        let store = Arc::new(CasStore::open(config).await.unwrap());
 
         let data = b"Hello, World!";
         let hash = store.put(data).await.unwrap();
@@ -150,7 +184,7 @@ mod tests {
             chunks_dir: dir.path().join("chunks"),
             ..Default::default()
         };
-        let store = std::sync::Arc::new(CasStore::open(config).await.unwrap());
+        let store = Arc::new(CasStore::open(config).await.unwrap());
 
         let data = b"ABCDEFGHIJ";
         let hash = store.put(data).await.unwrap();
@@ -177,7 +211,7 @@ mod tests {
             chunks_dir: dir.path().join("chunks"),
             ..Default::default()
         };
-        let store = std::sync::Arc::new(CasStore::open(config).await.unwrap());
+        let store = Arc::new(CasStore::open(config).await.unwrap());
 
         let chunk1 = b"AAAA";
         let chunk2 = b"BBBB";
@@ -213,7 +247,7 @@ mod tests {
             chunks_dir: dir.path().join("chunks"),
             ..Default::default()
         };
-        let store = std::sync::Arc::new(CasStore::open(config).await.unwrap());
+        let store = Arc::new(CasStore::open(config).await.unwrap());
 
         let data = b"short";
         let hash = store.put(data).await.unwrap();

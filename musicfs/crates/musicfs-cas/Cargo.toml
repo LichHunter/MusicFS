@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 musicfs-core = { path = "../musicfs-core" }
+musicfs-origins = { path = "../musicfs-origins" }
 tokio.workspace = true
 tracing.workspace = true
 serde.workspace = true

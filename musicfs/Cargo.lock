@@ -432,6 +432,7 @@ dependencies = [
  "hex",
  "musicfs-cache",
  "musicfs-core",
+ "musicfs-origins",
  "rmp-serde",
  "serde",
  "sled",

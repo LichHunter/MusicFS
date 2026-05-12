@@ -1,6 +1,7 @@
 use musicfs_cache::TreeBuilder;
-use musicfs_cas::{CasConfig, CasStore, ChunkManifest, ChunkRef, FileReader};
+use musicfs_cas::{CasConfig, CasStore, ChunkManifest, ChunkRef, ContentFetcher, FileReader};
 use musicfs_core::{FileId, FileMeta, OriginId, RealPath, VirtualPath};
+use musicfs_origins::LocalOrigin;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
@@ -97,4 +98,99 @@ async fn test_deduplication() {
 
     assert_eq!(hash1, hash2);
     assert_eq!(size_after_first, size_after_second);
+}
+
+#[tokio::test]
+async fn test_fetcher_cache_miss_flow() {
+    let origin_dir = TempDir::new().unwrap();
+    let cas_dir = TempDir::new().unwrap();
+
+    let test_content = b"This is audio content that will be fetched on cache miss";
+    let test_file_path = origin_dir.path().join("test.flac");
+    std::fs::write(&test_file_path, test_content).unwrap();
+
+    let config = CasConfig {
+        chunks_dir: cas_dir.path().join("chunks"),
+        ..Default::default()
+    };
+    let store = Arc::new(CasStore::open(config).await.unwrap());
+
+    let origin_id = OriginId::from("test-origin");
+    let origin = Arc::new(LocalOrigin::new(origin_id.clone(), origin_dir.path().to_path_buf()));
+
+    let fetcher = ContentFetcher::new(store.clone());
+    fetcher.register_origin(origin);
+
+    let file_id = FileId(42);
+    let file_meta = FileMeta {
+        id: file_id,
+        virtual_path: VirtualPath::new("/Artist/Album/test.flac"),
+        real_path: RealPath {
+            origin_id,
+            path: PathBuf::from("/test.flac"),
+        },
+        size: test_content.len() as u64,
+        mtime: SystemTime::now(),
+        content_hash: None,
+        audio: None,
+    };
+    fetcher.register_file(file_meta);
+
+    let manifest = fetcher.fetch_file(file_id).await.unwrap();
+
+    assert_eq!(manifest.file_id, file_id);
+    assert_eq!(manifest.total_size, test_content.len() as u64);
+    assert_eq!(manifest.chunks.len(), 1);
+
+    let chunk_data = store.get(&manifest.chunks[0].hash).await.unwrap();
+    assert_eq!(&chunk_data[..], test_content);
+}
+
+#[tokio::test]
+async fn test_reader_with_fetcher_integration() {
+    let origin_dir = TempDir::new().unwrap();
+    let cas_dir = TempDir::new().unwrap();
+
+    let test_content = b"Audio file content for reader integration test";
+    let test_file_path = origin_dir.path().join("song.flac");
+    std::fs::write(&test_file_path, test_content).unwrap();
+
+    let config = CasConfig {
+        chunks_dir: cas_dir.path().join("chunks"),
+        ..Default::default()
+    };
+    let store = Arc::new(CasStore::open(config).await.unwrap());
+
+    let origin_id = OriginId::from("local");
+    let origin = Arc::new(LocalOrigin::new(origin_id.clone(), origin_dir.path().to_path_buf()));
+
+    let fetcher = ContentFetcher::new(store.clone());
+    fetcher.register_origin(origin);
+
+    let file_id = FileId(100);
+    let file_meta = FileMeta {
+        id: file_id,
+        virtual_path: VirtualPath::new("/Test/song.flac"),
+        real_path: RealPath {
+            origin_id,
+            path: PathBuf::from("/song.flac"),
+        },
+        size: test_content.len() as u64,
+        mtime: SystemTime::now(),
+        content_hash: None,
+        audio: None,
+    };
+    fetcher.register_file(file_meta);
+
+    let reader = FileReader::with_fetcher(store, Arc::new(fetcher));
+
+    let result = reader
+        .read(file_id, 0, test_content.len() as u32)
+        .await
+        .unwrap();
+
+    assert_eq!(&result[..], test_content);
+
+    let result2 = reader.read(file_id, 0, 10).await.unwrap();
+    assert_eq!(&result2[..], &test_content[..10]);
 }
