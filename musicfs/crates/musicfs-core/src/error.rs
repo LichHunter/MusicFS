@@ -17,6 +17,9 @@ pub enum Error {
     #[error("Cache error: {0}")]
     Cache(String),
 
+    #[error("Metadata extraction error: {0}")]
+    Metadata(String),
+
     #[error("Database error: {0}")]
     Database(String),
 

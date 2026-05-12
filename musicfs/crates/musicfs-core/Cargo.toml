@@ -8,4 +8,4 @@ thiserror.workspace = true
 serde.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 xxhash-rust.workspace = true
-hex = "0.4"
+hex.workspace = true

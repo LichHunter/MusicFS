@@ -33,6 +33,11 @@
             # Dev tools
             cargo-watch
             cargo-nextest
+            cargo-criterion
+            
+            # gRPC tooling (Week 10+)
+            protobuf
+            grpcurl
           ];
           
           RUST_BACKTRACE = "1";
