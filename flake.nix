@@ -97,17 +97,17 @@ EOF
           buildInputs = [
             pythonEnv
             pkgs.fuse
+            pkgs.ffmpeg
+            pkgs.flac
           ];
 
           shellHook = ''
-            # Clear any system Python pollution and set clean PYTHONPATH
             unset PYTHONPATH
-            export PYTHONPATH="$PWD/beetsplug"
+            export PYTHONPATH="$PWD/beetsplug:$PWD/tests"
             echo "beetfs development environment (Python 2.7)"
             echo "  Python: $(python --version 2>&1)"
-            echo "  Run: python -c 'import beets; print(beets.__version__)'"
-            echo ""
-            echo "To mount: beet mount <mountpoint>"
+            echo "  Run tests: cd tests && python -m unittest discover"
+            echo "  Mount: beet mount <mountpoint>"
           '';
         };
       }
