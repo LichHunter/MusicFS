@@ -3,10 +3,17 @@ name = "musicfs-origins"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+s3 = []
+sftp = []
+
 [dependencies]
 musicfs-core = { path = "../musicfs-core" }
 async-trait.workspace = true
 dashmap.workspace = true
+libc.workspace = true
+thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "sync", "time"] }
 tracing.workspace = true
 

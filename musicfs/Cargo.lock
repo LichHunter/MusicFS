@@ -687,6 +687,7 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
@@ -727,8 +728,10 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "dashmap",
+ "libc",
  "musicfs-core",
  "tempfile",
+ "thiserror",
  "tokio",
  "tracing",
 ]

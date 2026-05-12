@@ -1,14 +1,20 @@
 mod failover;
 mod health;
 mod local;
+mod nfs;
 mod registry;
 mod router;
+mod s3;
+mod sftp;
+mod smb;
 mod traits;
 
 pub use failover::{FailoverExecutor, RetryConfig};
 pub use health::{HealthCheckHandle, HealthMonitor, HealthSnapshot, OriginHealthState};
 pub use local::LocalOrigin;
+pub use musicfs_core::OriginType;
+pub use nfs::NfsOrigin;
 pub use registry::OriginRegistry;
 pub use router::{LatencyStats, Router};
-pub use musicfs_core::OriginType;
+pub use smb::SmbOrigin;
 pub use traits::{Origin, WatchCallback, WatchEvent, WatchHandle};

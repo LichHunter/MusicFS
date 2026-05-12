@@ -59,3 +59,6 @@ clap = { version = "4", features = ["derive"] }
 
 # Testing
 tempfile = "3"
+
+# Platform-specific
+libc = "0.2"

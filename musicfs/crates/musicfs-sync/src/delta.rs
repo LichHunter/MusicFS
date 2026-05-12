@@ -1,5 +1,5 @@
 use crate::cdc::CdcChunker;
-use musicfs_core::{ChunkHash, FileId, FileMeta, OriginId, RealPath, VirtualPath};
+use musicfs_core::{ChunkHash, FileId, FileMeta, OriginId};
 use musicfs_origins::Origin;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -224,7 +224,7 @@ pub enum DeltaError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use musicfs_core::OriginId;
+    use musicfs_core::{OriginId, RealPath, VirtualPath};
     use std::time::SystemTime;
 
     fn make_file_meta(id: i64, path: &str, size: u64) -> FileMeta {

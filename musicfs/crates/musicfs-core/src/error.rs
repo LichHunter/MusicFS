@@ -37,6 +37,31 @@ pub enum Error {
 
     #[error("Origin error: {0}")]
     Origin(String),
+
+    #[error("S3 error: {0}")]
+    S3(String),
+
+    #[error("SFTP error: {0}")]
+    Sftp(String),
+
+    #[error("Operation timed out: {0}")]
+    Timeout(String),
+
+    #[error("Credential error: {0}")]
+    Credential(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl Error {
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, Error::FileNotFound(_))
+    }
+
+    pub fn downcast_io(&self) -> Option<&std::io::Error> {
+        match self {
+            Error::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
