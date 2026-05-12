@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package musicfs.v1;
+
+service MusicFS {
+  rpc Search(SearchRequest) returns (SearchResponse);
+  rpc SearchStream(SearchRequest) returns (stream SearchResult);
+}
+
+message SearchRequest {
+  string query = 1;
+  optional uint32 limit = 2;
+  optional uint32 offset = 3;
+  optional string origin_id = 4;
+}
+
+message SearchResponse {
+  repeated SearchResult results = 1;
+  uint64 total_matches = 2;
+  uint32 query_time_ms = 3;
+}
+
+message SearchResult {
+  int64 file_id = 1;
+  string virtual_path = 2;
+  optional string artist = 3;
+  optional string album = 4;
+  optional string title = 5;
+  float score = 6;
+  map<string, string> highlights = 7;
+}
