@@ -11,6 +11,7 @@ use std::sync::{Arc, RwLock};
 pub struct ChunkManifest {
     pub file_id: FileId,
     pub total_size: u64,
+    pub mtime: i64,
     pub chunks: Vec<ChunkRef>,
 }
 
@@ -23,11 +24,12 @@ impl ChunkManifest {
         rmp_serde::from_slice(data).ok()
     }
 
-    pub fn from_db(file_id: FileId, total_size: u64, chunk_blob: &[u8]) -> Option<Self> {
+    pub fn from_db(file_id: FileId, total_size: u64, mtime: i64, chunk_blob: &[u8]) -> Option<Self> {
         let chunks = Self::chunks_from_bytes(chunk_blob)?;
         Some(Self {
             file_id,
             total_size,
+            mtime,
             chunks,
         })
     }
@@ -166,6 +168,7 @@ mod tests {
         reader.register_manifest(ChunkManifest {
             file_id: FileId(1),
             total_size: data.len() as u64,
+            mtime: 0,
             chunks: vec![ChunkRef {
                 hash,
                 offset: 0,
@@ -193,6 +196,7 @@ mod tests {
         reader.register_manifest(ChunkManifest {
             file_id: FileId(1),
             total_size: data.len() as u64,
+            mtime: 0,
             chunks: vec![ChunkRef {
                 hash,
                 offset: 0,
@@ -222,6 +226,7 @@ mod tests {
         reader.register_manifest(ChunkManifest {
             file_id: FileId(1),
             total_size: 8,
+            mtime: 0,
             chunks: vec![
                 ChunkRef {
                     hash: hash1,
@@ -256,6 +261,7 @@ mod tests {
         reader.register_manifest(ChunkManifest {
             file_id: FileId(1),
             total_size: data.len() as u64,
+            mtime: 0,
             chunks: vec![ChunkRef {
                 hash,
                 offset: 0,
@@ -272,6 +278,7 @@ mod tests {
         let manifest = ChunkManifest {
             file_id: FileId(42),
             total_size: 1024,
+            mtime: 0,
             chunks: vec![ChunkRef {
                 hash: ChunkHash::from_bytes(b"test"),
                 offset: 0,

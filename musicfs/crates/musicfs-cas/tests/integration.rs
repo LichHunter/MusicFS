@@ -46,6 +46,7 @@ async fn test_cas_and_tree_integration() {
     reader.register_manifest(ChunkManifest {
         file_id: FileId(1),
         total_size: file_data.len() as u64,
+        mtime: 0,
         chunks: vec![ChunkRef {
             hash: chunk_hash,
             offset: 0,

@@ -4,3 +4,19 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+musicfs-core = { path = "../musicfs-core" }
+musicfs-origins = { path = "../musicfs-origins" }
+
+fastcdc = "3"
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
+notify = "6"
+rmp-serde = "1"
+
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,6 +1,7 @@
 use crate::{CasStore, ChunkManifest, ChunkRef};
 use musicfs_core::{Event, EventBus, FileId, FileMeta, OriginId};
 use musicfs_origins::Origin;
+use musicfs_sync::CdcChunker;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tracing::{debug, info};
@@ -10,6 +11,7 @@ pub struct ContentFetcher {
     origins: RwLock<HashMap<OriginId, Arc<dyn Origin>>>,
     file_meta: RwLock<HashMap<FileId, FileMeta>>,
     event_bus: Option<Arc<EventBus>>,
+    chunker: CdcChunker,
 }
 
 impl ContentFetcher {
@@ -19,6 +21,7 @@ impl ContentFetcher {
             origins: RwLock::new(HashMap::new()),
             file_meta: RwLock::new(HashMap::new()),
             event_bus: None,
+            chunker: CdcChunker::default(),
         }
     }
 
@@ -28,6 +31,7 @@ impl ContentFetcher {
             origins: RwLock::new(HashMap::new()),
             file_meta: RwLock::new(HashMap::new()),
             event_bus: Some(event_bus),
+            chunker: CdcChunker::default(),
         }
     }
 
@@ -71,25 +75,44 @@ impl ContentFetcher {
         );
 
         let data = origin
-            .read(&meta.real_path.path, 0, meta.size as u32)
+            .read_full(&meta.real_path.path)
             .await
             .map_err(|e| FetchError::OriginRead(e.to_string()))?;
 
-        let hash = self.store.put(&data).await.map_err(FetchError::Store)?;
+        let mtime = meta
+            .mtime
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        let chunks = self.chunker.chunk_refs(&data);
+        info!("Chunked {:?} into {} chunks", file_id, chunks.len());
+
+        let mut chunk_refs = Vec::with_capacity(chunks.len());
+        for chunk in chunks {
+            if !self.store.exists(&chunk.hash) {
+                self.store.put(chunk.data).await.map_err(FetchError::Store)?;
+            }
+
+            chunk_refs.push(ChunkRef {
+                hash: chunk.hash,
+                offset: chunk.offset,
+                size: chunk.length,
+            });
+        }
 
         let manifest = ChunkManifest {
             file_id,
             total_size: meta.size,
-            chunks: vec![ChunkRef {
-                hash,
-                offset: 0,
-                size: data.len() as u32,
-            }],
+            mtime,
+            chunks: chunk_refs,
         };
 
         debug!(
-            "Created manifest for {:?}: {} bytes, 1 chunk",
-            file_id, meta.size
+            "Created manifest for {:?}: {} bytes, {} chunks",
+            file_id,
+            meta.size,
+            manifest.chunks.len()
         );
 
         Ok(manifest)

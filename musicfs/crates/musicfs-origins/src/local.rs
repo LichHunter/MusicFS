@@ -93,11 +93,29 @@ impl Origin for LocalOrigin {
         let mut file = fs::File::open(&full_path).await?;
         file.seek(std::io::SeekFrom::Start(offset)).await?;
 
-        let mut buffer = vec![0u8; size as usize];
-        let bytes_read = file.read(&mut buffer).await?;
-        buffer.truncate(bytes_read);
+        // FIX: Loop until all requested bytes are read or EOF
+        // Single read() only returns kernel buffer (~2MB), not full request
+        let mut buffer = Vec::with_capacity(size as usize);
+        let mut temp_buf = vec![0u8; 64 * 1024]; // 64KB chunks
+        let mut total_read = 0usize;
+
+        while total_read < size as usize {
+            let to_read = std::cmp::min(temp_buf.len(), size as usize - total_read);
+            let n = file.read(&mut temp_buf[..to_read]).await?;
+            if n == 0 {
+                break; // EOF
+            }
+            buffer.extend_from_slice(&temp_buf[..n]);
+            total_read += n;
+        }
 
         Ok(buffer)
+    }
+
+    async fn read_full(&self, path: &Path) -> Result<Vec<u8>> {
+        let full_path = self.full_path(path);
+        debug!("LocalOrigin::read_full({:?})", full_path);
+        Ok(fs::read(&full_path).await?)
     }
 
     async fn exists(&self, path: &Path) -> Result<bool> {

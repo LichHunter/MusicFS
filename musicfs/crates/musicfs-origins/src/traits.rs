@@ -26,6 +26,9 @@ pub trait Origin: Send + Sync {
 
     async fn read(&self, path: &Path, offset: u64, size: u32) -> Result<Vec<u8>>;
 
+    /// Read entire file content (for CDC chunking of files <4GB)
+    async fn read_full(&self, path: &Path) -> Result<Vec<u8>>;
+
     async fn exists(&self, path: &Path) -> Result<bool>;
 
     async fn health(&self) -> HealthStatus;
