@@ -1,4 +1,4 @@
-use crate::types::{OriginId, VirtualPath};
+use crate::types::{FileId, OriginId, VirtualPath};
 use tokio::sync::broadcast;
 
 pub struct EventBus {
@@ -34,6 +34,7 @@ pub enum Event {
     },
     FileRemoved {
         path: VirtualPath,
+        file_id: Option<FileId>,
     },
     FileModified {
         path: VirtualPath,
