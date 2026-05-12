@@ -406,6 +406,7 @@ version = "0.1.0"
 dependencies = [
  "fuser",
  "libc",
+ "musicfs-cache",
  "musicfs-core",
  "tokio",
  "tracing",

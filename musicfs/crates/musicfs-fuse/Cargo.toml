@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 musicfs-core = { path = "../musicfs-core" }
+musicfs-cache = { path = "../musicfs-cache" }
 fuser.workspace = true
 tokio.workspace = true
 tracing.workspace = true
