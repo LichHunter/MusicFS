@@ -575,43 +575,294 @@ CREATE TABLE collections (
 
 #### 4.3.7 Control API
 
-**Unix Socket Protocol (JSON-RPC 2.0):**
+**Protocol Choice: gRPC over Unix Socket**
 
-```json
-// Request: Get cache statistics
-{"jsonrpc": "2.0", "method": "cache.stats", "id": 1}
+| Criterion | JSON-RPC | gRPC | Winner |
+|-----------|----------|------|--------|
+| Type safety | Runtime validation | Compile-time (protobuf) | gRPC |
+| Schema evolution | Ad-hoc versioning | Built-in field numbering | gRPC |
+| Streaming | Requires WebSocket/polling | Native bidirectional | gRPC |
+| Client generation | Manual per language | Auto-gen 10+ languages | gRPC |
+| Performance | JSON parse overhead | Binary, zero-copy | gRPC |
+| Debugging | Human-readable | Needs tooling (grpcurl) | JSON-RPC |
+| Simplicity | Lower barrier | Requires protoc | JSON-RPC |
 
-// Response
-{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "result": {
-        "hits": 15234,
-        "misses": 421,
-        "hit_rate": 0.973,
-        "chunks_stored": 84521,
-        "chunks_unique": 71203,
-        "dedup_ratio": 0.157,
-        "size_bytes": 5368709120
-    }
+**Decision:** gRPC for primary API. Human-readable debugging via `grpcurl` and CLI wrapper.
+
+**Rationale:**
+1. **Event streaming** - Native server-streaming for real-time sync/cache events without polling
+2. **Multi-language clients** - Auto-generated clients for Python (beets integration), Go, Node.js
+3. **Schema evolution** - Protobuf field numbering allows backward-compatible API changes
+4. **Performance** - Binary encoding avoids JSON serialization overhead on high-frequency stat() calls
+
+---
+
+**Protocol Buffer Definitions:**
+
+```protobuf
+syntax = "proto3";
+package musicfs.v1;
+
+// ============================================================================
+// Core Services
+// ============================================================================
+
+service MusicFS {
+    // Daemon lifecycle
+    rpc GetStatus(Empty) returns (StatusResponse);
+    rpc Shutdown(ShutdownRequest) returns (Empty);
+    
+    // Cache management
+    rpc GetCacheStats(Empty) returns (CacheStats);
+    rpc ClearCache(ClearCacheRequest) returns (ClearCacheResponse);
+    rpc Prefetch(PrefetchRequest) returns (stream PrefetchProgress);
+    
+    // Origin management
+    rpc ListOrigins(Empty) returns (OriginsResponse);
+    rpc GetOriginHealth(OriginRequest) returns (OriginHealth);
+    rpc RescanOrigin(OriginRequest) returns (stream SyncProgress);
+    
+    // Search
+    rpc Search(SearchRequest) returns (SearchResponse);
+    rpc SearchStream(SearchRequest) returns (stream SearchResult);
+    
+    // Events (server-streaming)
+    rpc SubscribeEvents(EventFilter) returns (stream Event);
 }
 
-// Request: Search
-{"jsonrpc": "2.0", "method": "search", "params": {"query": "metallica"}, "id": 2}
+// ============================================================================
+// Messages: Daemon
+// ============================================================================
 
-// Request: Refresh origin
-{"jsonrpc": "2.0", "method": "origin.rescan", "params": {"id": "local"}, "id": 3}
+message Empty {}
+
+message StatusResponse {
+    string version = 1;
+    uint64 uptime_seconds = 2;
+    string mount_point = 3;
+    MountState state = 4;
+    uint32 open_file_handles = 5;
+    uint64 fuse_ops_total = 6;
+}
+
+enum MountState {
+    MOUNT_STATE_UNKNOWN = 0;
+    MOUNT_STATE_MOUNTING = 1;
+    MOUNT_STATE_READY = 2;
+    MOUNT_STATE_SYNCING = 3;
+    MOUNT_STATE_DEGRADED = 4;  // Some origins unavailable
+    MOUNT_STATE_UNMOUNTING = 5;
+}
+
+message ShutdownRequest {
+    bool force = 1;              // Skip graceful drain
+    uint32 drain_timeout_ms = 2; // Max wait for in-flight ops (default: 5000)
+}
+
+// ============================================================================
+// Messages: Cache
+// ============================================================================
+
+message CacheStats {
+    // Hit/miss counters
+    uint64 hits = 1;
+    uint64 misses = 2;
+    double hit_rate = 3;
+    
+    // Storage
+    uint64 chunks_stored = 4;
+    uint64 chunks_unique = 5;    // After deduplication
+    double dedup_ratio = 6;      // Space saved by dedup
+    uint64 size_bytes = 7;
+    uint64 size_limit_bytes = 8;
+    
+    // Metadata cache
+    uint64 metadata_entries = 9;
+    uint64 metadata_bytes = 10;
+    
+    // Per-tier breakdown
+    TierStats l1_metadata = 11;
+    TierStats l2_headers = 12;
+    TierStats l3_chunks = 13;
+}
+
+message TierStats {
+    uint64 entries = 1;
+    uint64 bytes = 2;
+    uint64 evictions = 3;
+}
+
+message ClearCacheRequest {
+    optional string origin_id = 1;  // Empty = all origins
+    CacheTier tier = 2;             // Which tier to clear
+    bool dry_run = 3;               // Report what would be cleared
+}
+
+enum CacheTier {
+    CACHE_TIER_ALL = 0;
+    CACHE_TIER_METADATA = 1;
+    CACHE_TIER_HEADERS = 2;
+    CACHE_TIER_CHUNKS = 3;
+}
+
+message ClearCacheResponse {
+    uint64 entries_cleared = 1;
+    uint64 bytes_freed = 2;
+}
+
+message PrefetchRequest {
+    repeated string paths = 1;      // Virtual paths to prefetch
+    optional string query = 2;      // Or search query
+    PrefetchStrategy strategy = 3;
+}
+
+enum PrefetchStrategy {
+    PREFETCH_METADATA_ONLY = 0;     // Just stat info
+    PREFETCH_HEADERS = 1;           // Metadata + audio headers
+    PREFETCH_FULL = 2;              // Complete file content
+}
+
+message PrefetchProgress {
+    string path = 1;
+    uint64 bytes_fetched = 2;
+    uint64 bytes_total = 3;
+    bool complete = 4;
+    optional string error = 5;
+}
+
+// ============================================================================
+// Messages: Origins
+// ============================================================================
+
+message OriginRequest {
+    string origin_id = 1;
+}
+
+message OriginsResponse {
+    repeated OriginInfo origins = 1;
+}
+
+message OriginInfo {
+    string id = 1;
+    string origin_type = 2;         // "local", "sftp", "s3", "smb"
+    string display_name = 3;
+    OriginHealth health = 4;
+    uint64 file_count = 5;
+    uint64 total_bytes = 6;
+    int64 last_sync_unix = 7;
+}
+
+message OriginHealth {
+    HealthStatus status = 1;
+    uint32 latency_ms = 2;
+    optional string error_message = 3;
+    int64 last_check_unix = 4;
+}
+
+enum HealthStatus {
+    HEALTH_UNKNOWN = 0;
+    HEALTH_HEALTHY = 1;
+    HEALTH_DEGRADED = 2;            // Slow but working
+    HEALTH_UNHEALTHY = 3;           // Connection failed
+}
+
+message SyncProgress {
+    string origin_id = 1;
+    SyncPhase phase = 2;
+    uint64 files_scanned = 3;
+    uint64 files_changed = 4;
+    uint64 files_total = 5;
+    uint64 bytes_transferred = 6;
+    optional string current_file = 7;
+    bool complete = 8;
+    optional string error = 9;
+}
+
+enum SyncPhase {
+    SYNC_PHASE_SCANNING = 0;
+    SYNC_PHASE_COMPARING = 1;
+    SYNC_PHASE_FETCHING = 2;
+    SYNC_PHASE_INDEXING = 3;
+    SYNC_PHASE_COMPLETE = 4;
+}
+
+// ============================================================================
+// Messages: Search
+// ============================================================================
+
+message SearchRequest {
+    string query = 1;               // Full-text query
+    uint32 limit = 2;               // Max results (default: 100)
+    uint32 offset = 3;              // Pagination
+    repeated string fields = 4;     // Restrict to fields: artist, album, title
+    optional string origin_id = 5;  // Filter by origin
+}
+
+message SearchResponse {
+    repeated SearchResult results = 1;
+    uint64 total_matches = 2;
+    uint32 query_time_ms = 3;
+}
+
+message SearchResult {
+    string virtual_path = 1;
+    string title = 2;
+    string artist = 3;
+    string album = 4;
+    float score = 5;                // Relevance score
+    map<string, string> highlights = 6;  // Field -> highlighted snippet
+}
+
+// ============================================================================
+// Messages: Events
+// ============================================================================
+
+message EventFilter {
+    repeated EventType types = 1;   // Empty = all events
+    optional string origin_id = 2;  // Filter by origin
+}
+
+enum EventType {
+    EVENT_TYPE_ALL = 0;
+    EVENT_TYPE_FILE_ADDED = 1;
+    EVENT_TYPE_FILE_REMOVED = 2;
+    EVENT_TYPE_FILE_MODIFIED = 3;
+    EVENT_TYPE_ORIGIN_CONNECTED = 4;
+    EVENT_TYPE_ORIGIN_DISCONNECTED = 5;
+    EVENT_TYPE_SYNC_STARTED = 6;
+    EVENT_TYPE_SYNC_COMPLETED = 7;
+    EVENT_TYPE_CACHE_EVICTION = 8;
+}
+
+message Event {
+    EventType type = 1;
+    int64 timestamp_unix = 2;
+    string origin_id = 3;
+    optional string path = 4;
+    map<string, string> metadata = 5;
+}
 ```
 
-**CLI Interface:**
+---
+
+**CLI Interface** (wraps gRPC client):
+
 ```bash
 musicfs mount /mnt/music           # Mount filesystem
-musicfs status                      # Show daemon status
-musicfs cache stats                 # Cache statistics
-musicfs cache clear --origin=local  # Clear cache for origin
-musicfs search "metallica heavy"    # Search library
-musicfs origin list                 # List origins and health
-musicfs origin rescan local         # Force rescan
+musicfs status                      # GetStatus()
+musicfs cache stats                 # GetCacheStats()
+musicfs cache clear --origin=local  # ClearCache(origin_id="local")
+musicfs search "metallica heavy"    # Search(query="metallica heavy")
+musicfs origin list                 # ListOrigins()
+musicfs origin rescan local         # RescanOrigin() with progress
+musicfs events --type=file_added    # SubscribeEvents() stream
+```
+
+**Debugging:**
+```bash
+# Direct gRPC inspection via grpcurl
+grpcurl -unix /run/musicfs.sock musicfs.v1.MusicFS/GetStatus
+grpcurl -unix /run/musicfs.sock -d '{"query":"metallica"}' musicfs.v1.MusicFS/Search
 ```
 
 ---

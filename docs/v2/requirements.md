@@ -258,8 +258,8 @@ The system provides:
 
 | ID | Requirement |
 |----|-------------|
-| FR-17.1 | The system SHALL expose control via Unix socket |
-| FR-17.2 | The system SHOULD expose REST/gRPC API |
+| FR-17.1 | The system SHALL expose control via Unix socket (gRPC) |
+| FR-17.2 | The system SHALL use gRPC with Protocol Buffers for all control APIs |
 | FR-17.3 | The system SHALL support cache management commands (clear, refresh, stats) |
 | FR-17.4 | The system SHALL support runtime configuration changes |
 | FR-17.5 | The system SHALL support graceful shutdown with drain |
