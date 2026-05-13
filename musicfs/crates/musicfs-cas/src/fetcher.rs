@@ -129,6 +129,7 @@ impl ContentFetcher {
     pub fn emit_access_event(&self, meta: &FileMeta, offset: u64, size: u32) {
         if let Some(bus) = &self.event_bus {
             bus.publish(Event::FileAccessed {
+                file_id: meta.id,
                 path: meta.virtual_path.clone(),
                 origin_id: meta.real_path.origin_id.clone(),
                 offset,

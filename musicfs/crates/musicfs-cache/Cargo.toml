@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 musicfs-core = { path = "../musicfs-core" }
 musicfs-cas = { path = "../musicfs-cas" }
+musicfs-metadata = { path = "../musicfs-metadata" }
 rusqlite = { workspace = true, features = ["bundled"] }
 sled.workspace = true
 tokio.workspace = true
@@ -13,6 +14,9 @@ tracing.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 rmp-serde.workspace = true
+image.workspace = true
+parking_lot.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

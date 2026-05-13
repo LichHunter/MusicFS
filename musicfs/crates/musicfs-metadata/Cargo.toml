@@ -8,3 +8,4 @@ musicfs-core = { path = "../musicfs-core" }
 symphonia.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+image.workspace = true

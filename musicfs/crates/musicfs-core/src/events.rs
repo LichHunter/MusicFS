@@ -40,6 +40,7 @@ pub enum Event {
         path: VirtualPath,
     },
     FileAccessed {
+        file_id: FileId,
         path: VirtualPath,
         origin_id: OriginId,
         offset: u64,
