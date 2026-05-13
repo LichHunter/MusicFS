@@ -1,39 +1,110 @@
-# MusicFS Resilience Testing Strategy
+# MusicFS Resilience Testing: Design Doc
 
-**Date**: 2026-05-13
-**Status**: Proposal
-**Prerequisites**: [resilience-fault-tolerance.md](resilience-fault-tolerance.md)
-
----
-
-## 1. Current State
-
-- **162 tests** across 43 files — all unit/integration, no fault injection
-- **Zero chaos/resilience tests** — no error injection, no crash recovery, no signal handling
-- **E2E tests are manual** — `tests/e2e/e2e_players.rs` is `#[ignore]`, requires pre-mounted FUSE
-- **No mocking framework** — tests use real components with TempDir
-- **No CI pipeline** — no GitHub Actions, tests run manually via `cargo test`
-- **Test tools available** in Nix flake: `cargo-nextest`, `cargo-criterion`
+**Authors:** AI-assisted  
+**Status:** Draft  
+**Last Updated:** 2026-05-13  
+**Reviewers:** TBD  
+**Approvers:** TBD  
+**Prerequisites:** [resilience-fault-tolerance.md](resilience-fault-tolerance.md), [architecture.md](../architecture.md)
 
 ---
 
-## 2. Testing Layers
+[TOC]
 
-Three layers, from fast/cheap to slow/thorough:
+---
+
+## 1. Abstract
+
+MusicFS has 162 unit/integration tests but zero fault injection, crash recovery, or resilience tests. This design doc defines the test infrastructure, tooling, and test cases needed to verify that MusicFS survives the 34 failure modes identified in the [resilience audit](resilience-fault-tolerance.md).
+
+The approach uses three testing layers: trait-based mocks with failpoints for fast unit-level verification, fork-kill process tests for crash and signal recovery, and Toxiproxy with Docker for real-protocol network fault injection. A new `musicfs-test-utils` crate centralizes shared test helpers that are currently duplicated across 29 files.
+
+---
+
+## 2. Background
+
+### 2.1 Current Test State
+
+| Metric | Value |
+|--------|-------|
+| Total tests | 162 |
+| Test files with `#[cfg(test)]` | 43 |
+| Async tests (`#[tokio::test]`) | 44 |
+| Fault injection tests | 0 |
+| Crash recovery tests | 0 |
+| Signal handling tests | 0 |
+| CI pipeline | None |
+| Mocking framework | None (real components + TempDir) |
+
+### 2.2 What Exists
+
+- **Unit tests**: Per-crate `#[cfg(test)]` modules using real implementations with `TempDir` isolation
+- **Integration tests**: `crates/musicfs-cas/tests/integration.rs` — CAS + fetcher + reader pipeline
+- **E2E tests**: `tests/e2e/e2e_players.rs` — mpv/VLC playback over mounted FUSE (`#[ignore]`, manual)
+- **Test helpers**: `make_file_meta()`, `mock_health()` — duplicated across modules, not centralized
+- **Test tooling**: `cargo-nextest` and `cargo-criterion` available in Nix flake
+
+### 2.3 What's Missing
+
+The [resilience audit](resilience-fault-tolerance.md) identified 34 failure modes across 6 phases. None have test coverage. The audit covers:
+- Signal handling and graceful shutdown (Phase A)
+- Crash recovery and cache integrity (Phase B)
+- Network fault tolerance and origin failover (Phase C-D)
+- Runtime deadlocks and resource exhaustion (Phase E)
+- Cache/database sudden death and passthrough mode (Phase F)
+
+### 2.4 Why "Doing Nothing" Is Not an Option
+
+MusicFS is designed as a critical filesystem daemon. Untested failure paths mean:
+- Crashes that corrupt SQLite, sled, or tantivy go undetected until production
+- Signal handling code (once implemented) has no regression tests
+- Origin failover logic is tested for correctness but not for actual failure scenarios
+- No confidence that the daemon survives real-world conditions (disk full, NAS reboot, OOM)
+
+---
+
+## 3. Goals & Non-Goals
+
+### 3.1 Goals
+
+- **Every resilience issue gets a test** — all 34 failure modes from the audit mapped to concrete test cases
+- **Tests run without root** — no kernel modules, no privileged containers for Layer 1 and Layer 2
+- **Tests run fast** — Layer 1 tests complete in <1 second each; full resilience suite in <60 seconds
+- **Failpoints are zero-cost** — conditional compilation via Cargo features; no runtime overhead in release builds
+- **Test helpers are centralized** — `musicfs-test-utils` crate eliminates duplication across 29 files
+
+### 3.2 Non-Goals
+
+- **Full chaos engineering platform** — this is not Jepsen; we test known failure modes, not random exploration
+- **Performance benchmarking** — covered separately by `cargo-criterion`; this doc is about correctness under failure
+- **CI pipeline setup** — pipeline configuration (GitHub Actions, Nix CI) is a separate task; this doc defines what to run, not where
+- **FUSE kernel-level testing** — testing kernel FUSE module behavior or `/dev/fuse` edge cases is out of scope
+
+---
+
+## 4. Proposed Design
+
+### 4.1 Testing Layers
 
 ```
-Layer 1: Trait-based mocks + failpoints     (ms per test,  cargo test)
-Layer 2: Fork-kill crash recovery           (seconds,      cargo test)
-Layer 3: Toxiproxy + Docker integration     (seconds,      docker compose + cargo test)
+┌─────────────────────────────────────────────────────────────┐
+│ Layer 3: Toxiproxy + Docker                                  │
+│ Real protocols, real latency, real connection drops           │
+│ ~5 tests, seconds each, requires docker-compose              │
+├─────────────────────────────────────────────────────────────┤
+│ Layer 2: Fork-Kill Process Tests                             │
+│ Spawn daemon, send signals, kill -9, verify recovery         │
+│ ~5 tests, seconds each, cargo test                           │
+├─────────────────────────────────────────────────────────────┤
+│ Layer 1: Trait Mocks + Failpoints                            │
+│ FaultyOrigin, FaultyCasStore, fail_point! macros             │
+│ ~25 tests, milliseconds each, cargo test                     │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-**Rule**: Every resilience issue gets at least Layer 1 coverage. Critical issues get Layer 2. Network-specific issues get Layer 3.
+**Rule**: Every resilience issue gets Layer 1 coverage at minimum. Critical issues (signal handling, crash recovery, FUSE unmount) additionally get Layer 2. Network-specific issues (origin failover, latency, connection drops) additionally get Layer 3.
 
----
-
-## 3. Tooling
-
-### 3.1 Required New Dependencies
+### 4.2 New Dependencies
 
 ```toml
 # Cargo.toml [workspace.dependencies]
@@ -44,869 +115,148 @@ nix = "0.29"                    # Signal sending, process control
 # Cargo.toml [workspace.features]
 failpoints = ["fail/failpoints"]  # Zero-cost when disabled
 
-# dev-dependencies only
-wiremock = "0.6"                # HTTP mock server (for S3 origin tests)
+# dev-dependencies only (not shipped in release binary)
+wiremock = "0.6"                # HTTP mock server (S3 origin tests)
 assert_cmd = "2.0"              # CLI integration testing
 ```
 
-### 3.2 Test Infrastructure to Build
+**Why these choices:**
+- **`fail`** (TiKV failpoints): Production-proven by TiKV (distributed KV store). Zero overhead when `failpoints` feature is disabled. Supports deterministic failure injection with counter/probability controls.
+- **`rlimit`**: Test fd exhaustion and memory limits without root. Wraps `setrlimit`/`getrlimit` syscalls.
+- **`nix`**: Send signals to child processes (`kill(pid, SIGTERM)`). Already a transitive dependency via `fuser`.
+- **`wiremock`**: Pure-Rust HTTP mock server for S3 origin testing. No external process needed.
 
-**`crates/musicfs-test-utils/`** — new crate with shared test helpers:
+### 4.3 Test Infrastructure Crate
+
+**`crates/musicfs-test-utils/`** — new workspace crate providing shared test helpers.
+
+#### 4.3.1 FaultyOrigin
+
+Wraps any `Origin` implementation with configurable failure injection:
 
 ```rust
-// Faulty origin wrapper — implements Origin trait, injects failures
 pub struct FaultyOrigin {
     inner: Arc<dyn Origin>,
     fail_mode: Arc<RwLock<FailMode>>,
+    call_count: AtomicUsize,
 }
 
 pub enum FailMode {
-    Healthy,
-    FailEveryNth(usize),
-    FailAfterN(usize),
-    TimeoutMs(u64),
-    PartialRead { max_bytes: usize },
-    ReturnError(io::ErrorKind),
+    Healthy,                           // Pass through to inner
+    FailEveryNth(usize),               // Fail on every Nth call
+    FailAfterN(usize),                 // Succeed N times, then always fail
+    TimeoutMs(u64),                    // Sleep then fail (simulates hung NFS)
+    PartialRead { max_bytes: usize },  // Return truncated data
+    ReturnError(io::ErrorKind),        // Return specific error
 }
+```
 
-// Faulty CAS wrapper — injects disk errors
+Implements `Origin` trait. `fail_mode` is `Arc<RwLock<>>` so tests can change behavior mid-test (e.g., origin "recovers" after health check).
+
+#### 4.3.2 FaultyCasStore
+
+Wraps `CasStore` with injectable disk errors:
+
+```rust
 pub struct FaultyCasStore {
     inner: CasStore,
-    inject_enospc: AtomicBool,
-    inject_eio_on_read: AtomicBool,
-    inject_corruption: AtomicBool,
+    inject_enospc: AtomicBool,       // put() fails with ENOSPC
+    inject_eio_on_read: AtomicBool,  // get() fails with EIO
+    inject_corruption: AtomicBool,   // get() returns bad data
 }
+```
 
-// Shared test helpers (currently duplicated across 29 files)
+#### 4.3.3 Centralized Fixtures
+
+Currently duplicated across 29 test modules:
+
+```rust
 pub fn make_file_meta(id: i64, vpath: &str, size: u64) -> FileMeta;
 pub fn make_audio_meta(artist: &str, album: &str, title: &str) -> AudioMeta;
 pub async fn setup_test_cas(dir: &Path) -> Arc<CasStore>;
 pub fn setup_test_tree(files: &[FileMeta]) -> Arc<RwLock<VirtualTree>>;
 ```
 
----
+### 4.4 Failpoints Instrumentation
 
-## 4. Issue → Test Mapping
+Production code locations that need `fail_point!` macros:
 
-### Phase A: Stop Dying
+| Location | Failpoint Name | Simulates |
+|----------|---------------|-----------|
+| `musicfs-cas/src/store.rs` `put()` | `cas-put-before-write` | ENOSPC before chunk write |
+| `musicfs-cas/src/store.rs` `put()` | `cas-put-after-write-before-index` | Crash between write and sled insert |
+| `musicfs-cas/src/reader.rs` `get_or_fetch_manifest()` | `reader-manifest-fetch` | Manifest fetch failure |
+| `musicfs-sync/src/delta.rs` `detect_changes()` | `delta-sync-after-batch` | Crash mid-sync |
+| `musicfs-origins/src/health.rs` `check_one()` | `health-check-hang` | Health check hangs forever |
+| `musicfs-cache/src/db.rs` `open()` | `db-open-corrupt` | Database corruption on open |
 
-#### 2.1 No Signal Handling (SIGTERM/SIGINT)
+All guarded by `#[cfg(feature = "failpoints")]` — zero-cost in release builds.
 
-**Test approach**: Spawn daemon as child process, send signal, verify behavior.
+### 4.5 Test File Organization
 
-```rust
-// tests/resilience/signal_handling.rs
-
-#[tokio::test]
-async fn test_sigterm_triggers_shutdown() {
-    // Spawn the daemon
-    let mut child = Command::new(env!("CARGO_BIN_EXE_musicfs"))
-        .args(["mount", "--origin", &test_dir, &mount_dir])
-        .spawn().unwrap();
-
-    // Wait for mount
-    wait_for_mount(&mount_dir).await;
-
-    // Send SIGTERM
-    nix::sys::signal::kill(
-        nix::unistd::Pid::from_raw(child.id() as i32),
-        nix::sys::signal::Signal::SIGTERM,
-    ).unwrap();
-
-    // Verify clean exit (not killed by signal)
-    let status = tokio::time::timeout(
-        Duration::from_secs(10), child.wait()
-    ).await.unwrap().unwrap();
-    assert!(status.success() || status.code() == Some(0));
-
-    // Verify mountpoint is unmounted
-    assert!(!is_mounted(&mount_dir));
-}
-
-#[tokio::test]
-async fn test_sigint_triggers_shutdown() {
-    // Same pattern with SIGINT
-}
-
-#[tokio::test]
-async fn test_double_signal_forces_immediate_exit() {
-    // Send SIGTERM, then SIGTERM again within 1s
-    // Verify daemon exits immediately on second signal
-}
+```
+musicfs/
+├── crates/
+│   └── musicfs-test-utils/          # NEW — shared test helpers
+│       ├── Cargo.toml
+│       └── src/
+│           ├── lib.rs
+│           ├── faulty_origin.rs     # FaultyOrigin with FailMode
+│           ├── faulty_cas.rs        # FaultyCasStore
+│           ├── fixtures.rs          # make_file_meta, setup_test_cas, etc.
+│           └── assertions.rs        # Custom assertions
+├── tests/
+│   ├── resilience/                  # NEW — resilience test suite
+│   │   ├── mod.rs
+│   │   ├── signal_handling.rs       # SIGTERM/SIGINT/double-signal
+│   │   ├── crash_recovery.rs        # Fork-kill + state verification
+│   │   ├── cache_corruption.rs      # SQLite/sled/tantivy/CAS corruption
+│   │   ├── disk_failure.rs          # ENOSPC, permissions, passthrough mode
+│   │   ├── resource_limits.rs       # fd exhaustion, memory limits
+│   │   └── lock_poisoning.rs        # RwLock poison recovery
+│   ├── failpoints/                  # NEW — failpoint-gated tests
+│   │   ├── mod.rs
+│   │   ├── origin_failures.rs       # Injected origin errors
+│   │   ├── sync_interruption.rs     # Delta sync crash/resume
+│   │   └── cas_failures.rs          # CAS write failures
+│   ├── integration/                 # NEW — network integration (Docker)
+│   │   ├── docker-compose.yml
+│   │   ├── network_faults.rs        # Toxiproxy: latency, drops, bandwidth
+│   │   └── origin_failover.rs       # Multi-origin failover integration
+│   └── e2e/
+│       └── e2e_players.rs           # Existing (unchanged)
 ```
 
-**Layer**: 2 (fork-kill)
-**Can test before implementation?**: No — signal handler must exist first. Write tests first as spec, they'll fail until implementation.
+**Running**:
+```bash
+# Layer 1: Fast resilience tests (no Docker, no FUSE)
+cargo test --lib --tests resilience
 
----
+# Layer 1: Failpoint tests (sequential, feature-gated)
+cargo test --features failpoints --test failpoints -- --test-threads 1
 
-#### 2.2 No Panic Hook
+# Layer 2: Process-level tests (included in resilience/)
+cargo test --test resilience
 
-**Test approach**: Trigger panic in background task, verify logging and continued operation.
+# Layer 3: Network integration (requires docker-compose up)
+cargo test --test integration -- --ignored
 
-```rust
-#[tokio::test]
-async fn test_panic_in_background_task_is_logged() {
-    // Setup tracing subscriber that captures error events
-    let (subscriber, logs) = test_subscriber();
-
-    // Spawn a task that panics
-    let handle = tokio::spawn(async {
-        panic!("test panic in background task");
-    });
-
-    // Wait for task to complete
-    let result = handle.await;
-    assert!(result.is_err()); // JoinError with panic
-
-    // Verify panic was logged (requires custom panic hook)
-    assert!(logs.contains("test panic in background task"));
-}
-
-#[test]
-fn test_panic_hook_includes_backtrace() {
-    // Install custom panic hook
-    install_panic_hook();
-
-    let result = std::panic::catch_unwind(|| {
-        panic!("deliberate test panic");
-    });
-
-    assert!(result.is_err());
-    // Verify hook logged thread name + backtrace
-}
+# All layers
+cargo nextest run --features failpoints
 ```
 
-**Layer**: 1 (unit)
+### 4.6 Integration Test Docker Setup
 
----
-
-#### 2.3 Graceful Shutdown Orchestration
-
-**Test approach**: Start all components, trigger shutdown, verify ordered teardown.
-
-```rust
-#[tokio::test]
-async fn test_shutdown_order() {
-    let events = Arc::new(Mutex::new(Vec::<String>::new()));
-
-    // Setup components with shutdown tracking
-    let token = CancellationToken::new();
-
-    // Spawn mock background tasks that log shutdown order
-    let watcher_events = events.clone();
-    let watcher_token = token.clone();
-    tokio::spawn(async move {
-        watcher_token.cancelled().await;
-        watcher_events.lock().unwrap().push("watcher_stopped".into());
-    });
-
-    let indexer_events = events.clone();
-    let indexer_token = token.clone();
-    tokio::spawn(async move {
-        indexer_token.cancelled().await;
-        indexer_events.lock().unwrap().push("indexer_stopped".into());
-    });
-
-    // Trigger shutdown
-    token.cancel();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let order = events.lock().unwrap();
-    assert!(order.contains(&"watcher_stopped".to_string()));
-    assert!(order.contains(&"indexer_stopped".to_string()));
-}
-
-#[tokio::test]
-async fn test_shutdown_flushes_tantivy() {
-    let dir = TempDir::new().unwrap();
-    let index = SearchIndex::open(dir.path()).unwrap();
-
-    // Add document without committing
-    index.index_file(&make_file_meta(1, "/a.flac", 1000)).unwrap();
-
-    // Trigger graceful shutdown (should commit)
-    index.commit().unwrap();
-
-    // Reopen and verify document survived
-    let index2 = SearchIndex::open(dir.path()).unwrap();
-    let results = index2.search("a", 10).unwrap();
-    assert_eq!(results.len(), 1);
-}
-
-#[tokio::test]
-async fn test_shutdown_with_inflight_reads() {
-    // Start a slow read (simulated via FaultyOrigin with TimeoutMs)
-    // Trigger shutdown
-    // Verify: read completes or returns EIO (not hang)
-    // Verify: daemon exits within drain_timeout
-}
-```
-
-**Layer**: 1 (unit) + 2 (process-level for full integration)
-
----
-
-#### 2.4 Cache Integrity on Startup
-
-**Test approach**: Corrupt storage, reopen, verify detection and recovery.
-
-```rust
-#[tokio::test]
-async fn test_sqlite_integrity_check_detects_corruption() {
-    let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("test.db");
-
-    // Create valid DB
-    {
-        let db = Database::open(&db_path).unwrap();
-        db.upsert_file(/* ... */).unwrap();
-    }
-
-    // Corrupt the file (overwrite middle bytes)
-    let mut data = std::fs::read(&db_path).unwrap();
-    if data.len() > 200 {
-        data[100..200].fill(0xFF);
-    }
-    std::fs::write(&db_path, &data).unwrap();
-
-    // Reopen — should detect corruption
-    let result = Database::open_with_integrity_check(&db_path);
-    assert!(matches!(result, Err(Error::DatabaseCorrupted(_))));
-}
-
-#[tokio::test]
-async fn test_tantivy_corruption_triggers_rebuild() {
-    let dir = TempDir::new().unwrap();
-
-    // Create valid index
-    {
-        let index = SearchIndex::open(dir.path()).unwrap();
-        index.index_file(&make_file_meta(1, "/a.flac", 1000)).unwrap();
-        index.commit().unwrap();
-    }
-
-    // Corrupt meta.json
-    std::fs::write(dir.path().join("meta.json"), b"corrupted").unwrap();
-
-    // Reopen — should detect and recreate
-    let index = SearchIndex::open_with_recovery(dir.path()).unwrap();
-    // Index is empty (rebuilt) but functional
-    let results = index.search("a", 10).unwrap();
-    assert_eq!(results.len(), 0);
-}
-
-#[tokio::test]
-async fn test_sled_corruption_triggers_repair() {
-    let dir = TempDir::new().unwrap();
-    let config = CasConfig { chunks_dir: dir.path().join("chunks"), ..Default::default() };
-
-    // Create valid store
-    {
-        let store = CasStore::open(config.clone()).await.unwrap();
-        store.put(b"test data").await.unwrap();
-    }
-
-    // Corrupt sled files
-    for entry in std::fs::read_dir(dir.path().join("chunks/index.sled")).unwrap() {
-        let entry = entry.unwrap();
-        if entry.path().extension().is_some() {
-            std::fs::write(entry.path(), b"corrupted").unwrap();
-        }
-    }
-
-    // Reopen — should attempt repair
-    let result = CasStore::open(config).await;
-    // Either succeeds with repair, or returns clear error
-    // (depends on implementation choice)
-}
-```
-
-**Layer**: 1 (unit)
-
----
-
-#### 2.5 Interrupted Sync Recovery
-
-**Test approach**: Failpoints to crash mid-sync, verify resume on restart.
-
-```rust
-#[tokio::test]
-#[cfg(feature = "failpoints")]
-async fn test_sync_resumes_after_crash() {
-    let dir = TempDir::new().unwrap();
-
-    // Set failpoint: crash after processing 50 files
-    fail::cfg("delta-sync-after-batch", "50*off->return").unwrap();
-
-    let detector = DeltaDetector::new(dir.path());
-    let result = detector.detect_changes(&origin).await;
-    assert!(result.is_err()); // Crashed at file 50
-
-    // Resume — should continue from checkpoint
-    fail::remove("delta-sync-after-batch");
-    let result = detector.detect_changes(&origin).await;
-    assert!(result.is_ok());
-
-    // Verify: processed file count = total (not total + 50 duplicates)
-}
-```
-
-**Layer**: 1 (failpoints)
-
----
-
-#### 2.6 Fire-and-Forget Tasks
-
-**Test approach**: Spawn task that panics, verify supervisor detects and restarts.
-
-```rust
-#[tokio::test]
-async fn test_task_supervisor_detects_panic() {
-    let supervisor = TaskSupervisor::new();
-
-    // Register a task that panics after 100ms
-    supervisor.spawn_supervised("test_task", async {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        panic!("deliberate task panic");
-    });
-
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // Verify: supervisor detected the failure
-    let status = supervisor.task_status("test_task");
-    assert!(matches!(status, TaskStatus::Failed { .. }));
-}
-
-#[tokio::test]
-async fn test_task_supervisor_restarts_critical_task() {
-    let call_count = Arc::new(AtomicU32::new(0));
-    let count = call_count.clone();
-
-    let supervisor = TaskSupervisor::new();
-    supervisor.spawn_critical("health_monitor", move || {
-        let count = count.clone();
-        async move {
-            count.fetch_add(1, Ordering::SeqCst);
-            if count.load(Ordering::SeqCst) == 1 {
-                panic!("first run fails");
-            }
-            // Second run succeeds — loop forever
-            loop { tokio::time::sleep(Duration::from_secs(60)).await; }
-        }
-    });
-
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    // Task panicked once, was restarted, is now running
-    assert_eq!(call_count.load(Ordering::SeqCst), 2);
-    assert!(matches!(supervisor.task_status("health_monitor"), TaskStatus::Running));
-}
-```
-
-**Layer**: 1 (unit)
-
----
-
-#### 2.7 FUSE Unmount on Crash
-
-**Test approach**: Fork daemon, kill -9, verify mountpoint state.
-
-```rust
-#[tokio::test]
-async fn test_stale_mount_detected_on_startup() {
-    let mount_dir = TempDir::new().unwrap();
-
-    // Simulate stale FUSE mount (create a marker that looks mounted)
-    // In real test: spawn daemon, kill -9, check /proc/mounts
-
-    // Verify: new mount attempt detects stale mount and cleans up
-    // (fusermount -u or auto-unmount)
-}
-
-#[test]
-fn test_systemd_service_has_execstoppost() {
-    let service = std::fs::read_to_string("dist/musicfs.service").unwrap();
-    assert!(service.contains("ExecStopPost"));
-    assert!(service.contains("fusermount"));
-}
-```
-
-**Layer**: 2 (fork-kill) + 1 (config validation)
-
----
-
-#### 2.8 Disk Space Handling
-
-**Test approach**: rlimit to constrain file size, or fill TempDir.
-
-```rust
-#[tokio::test]
-async fn test_cas_put_handles_enospc() {
-    let dir = TempDir::new().unwrap();
-    let config = CasConfig {
-        chunks_dir: dir.path().join("chunks"),
-        max_size: 1024, // 1KB limit
-        ..Default::default()
-    };
-    let store = CasStore::open(config).await.unwrap();
-
-    // Fill the store past limit
-    let big_data = vec![0u8; 2048];
-    let result = store.put(&big_data).await;
-
-    // Should fail gracefully, not panic
-    assert!(result.is_err() || store.current_size() <= 1024);
-}
-
-#[tokio::test]
-async fn test_eviction_triggers_at_watermark() {
-    // Create store with small max_size
-    // Fill to 90%
-    // Verify: background eviction triggered
-    // Write more data
-    // Verify: still under limit
-}
-```
-
-**Layer**: 1 (unit)
-
----
-
-#### 2.9 RwLock Poison Recovery
-
-**Test approach**: Poison a lock, verify FUSE operations survive.
-
-```rust
-#[test]
-fn test_poisoned_tree_lock_returns_eio_not_panic() {
-    let tree = Arc::new(std::sync::RwLock::new(VirtualTree::new()));
-
-    // Poison the lock by panicking inside a write guard
-    let tree_clone = tree.clone();
-    let _ = std::thread::spawn(move || {
-        let _guard = tree_clone.write().unwrap();
-        panic!("poisoning the lock");
-    }).join();
-
-    // Verify: lock is poisoned
-    assert!(tree.read().is_err());
-
-    // After fix: should recover via unwrap_or_else(|p| p.into_inner())
-    // OR: switch to parking_lot::RwLock which never poisons
-}
-
-#[test]
-fn test_parking_lot_rwlock_survives_panic() {
-    let tree = Arc::new(parking_lot::RwLock::new(VirtualTree::new()));
-
-    let tree_clone = tree.clone();
-    let _ = std::thread::spawn(move || {
-        let _guard = tree_clone.write();
-        panic!("writer panic");
-    }).join();
-
-    // parking_lot: lock is NOT poisoned, read succeeds
-    let guard = tree.read();
-    assert!(guard.get(ROOT_INODE).is_some());
-}
-```
-
-**Layer**: 1 (unit)
-
----
-
-#### 2.10 sd_notify Integration
-
-**Test approach**: Mock the notify socket, verify messages.
-
-```rust
-#[test]
-fn test_sd_notify_ready_sent() {
-    // Create a Unix socket to capture sd_notify messages
-    let dir = TempDir::new().unwrap();
-    let socket_path = dir.path().join("notify.sock");
-
-    std::env::set_var("NOTIFY_SOCKET", &socket_path);
-
-    let listener = std::os::unix::net::UnixDatagram::bind(&socket_path).unwrap();
-
-    // Call the notify function
-    sd_notify::notify(false, &[sd_notify::NotifyState::Ready]).unwrap();
-
-    // Verify message received
-    let mut buf = [0u8; 256];
-    let n = listener.recv(&mut buf).unwrap();
-    let msg = std::str::from_utf8(&buf[..n]).unwrap();
-    assert!(msg.contains("READY=1"));
-}
-```
-
-**Layer**: 1 (unit)
-
----
-
-### Phase C-D: Network & Origin Failures
-
-#### Origin Failover Under Network Failure
-
-**Test approach**: FaultyOrigin trait mock with configurable failures.
-
-```rust
-#[tokio::test]
-async fn test_failover_on_primary_death() {
-    let primary = Arc::new(FaultyOrigin::new(
-        LocalOrigin::new("primary", &primary_dir),
-        FailMode::ReturnError(io::ErrorKind::ConnectionRefused),
-    ));
-    let secondary = Arc::new(LocalOrigin::new("secondary", &secondary_dir));
-
-    let registry = OriginRegistry::new(/* ... */);
-    registry.register(primary, 1);
-    registry.register(secondary, 2);
-
-    let executor = FailoverExecutor::new(registry, RetryConfig::default());
-
-    // Read should fail on primary, succeed on secondary
-    let result = executor.read_with_failover(&path, 0, 100).await;
-    assert!(result.is_ok());
-}
-
-#[tokio::test]
-async fn test_all_origins_dead_returns_cached() {
-    // All origins return errors
-    // CAS has cached chunks
-    // Verify: reads from CAS succeed
-    // Verify: AllOriginsUnhealthy event emitted
-}
-
-#[tokio::test]
-async fn test_origin_recovery_resumes_routing() {
-    let origin = Arc::new(FaultyOrigin::new(
-        LocalOrigin::new("test", &dir),
-        FailMode::FailAfterN(0), // Starts dead
-    ));
-
-    // Register and verify unhealthy
-    monitor.add_origin(origin.clone());
-    monitor.check_now(&id).await;
-    assert!(monitor.snapshot().is_unhealthy(&id));
-
-    // "Recover" — switch to healthy mode
-    origin.set_mode(FailMode::Healthy);
-    monitor.check_now(&id).await;
-    assert!(monitor.snapshot().is_healthy(&id));
-}
-```
-
-**Layer**: 1 (trait mocks)
-
----
-
-#### Health Check Timeout (Gap 4.2.1)
-
-```rust
-#[tokio::test]
-async fn test_local_origin_health_check_has_timeout() {
-    // Create origin pointing to path that will hang on stat()
-    // (e.g., an NFS mount to a dead server — simulated via FaultyOrigin with TimeoutMs)
-    let origin = Arc::new(FaultyOrigin::new(
-        LocalOrigin::new("slow", &dir),
-        FailMode::TimeoutMs(30_000), // 30s hang
-    ));
-
-    let monitor = HealthMonitor::new(Duration::from_secs(30));
-    monitor.add_origin(origin);
-
-    // Health check should complete within 5s (timeout), not 30s
-    let start = Instant::now();
-    monitor.check_now(&OriginId::from("slow")).await;
-    assert!(start.elapsed() < Duration::from_secs(10));
-
-    // Origin should be marked unhealthy
-    assert!(monitor.snapshot().is_unhealthy(&OriginId::from("slow")));
-}
-```
-
-**Layer**: 1 (unit)
-
----
-
-#### Sequential Health Check Blocking (Gap 4.2.2)
-
-```rust
-#[tokio::test]
-async fn test_health_checks_run_in_parallel() {
-    // 3 origins: 2 healthy (instant), 1 dead (5s timeout)
-    // check_all() should complete in ~5s, not ~15s
-
-    let monitor = HealthMonitor::new(Duration::from_secs(30));
-    monitor.add_origin(healthy_origin_1);
-    monitor.add_origin(healthy_origin_2);
-    monitor.add_origin(dead_origin); // 5s timeout
-
-    let start = Instant::now();
-    monitor.check_all().await;
-    let elapsed = start.elapsed();
-
-    // Parallel: ~5s. Sequential: ~15s.
-    assert!(elapsed < Duration::from_secs(8));
-
-    // Both healthy origins should be healthy (not delayed by dead one)
-    let snapshot = monitor.snapshot();
-    assert!(snapshot.is_healthy(&healthy_1_id));
-    assert!(snapshot.is_healthy(&healthy_2_id));
-}
-```
-
-**Layer**: 1 (unit)
-
----
-
-### Phase E: Runtime Robustness
-
-#### FUSE↔tokio Deadlock (Gap 5.1)
-
-```rust
-#[tokio::test]
-async fn test_concurrent_fuse_reads_dont_deadlock() {
-    // Mount FUSE with spawn_mount2
-    // Spawn 100 concurrent reads via tokio::fs::read
-    // Set timeout of 30s
-    // If any read doesn't complete → deadlock detected
-
-    let mount_dir = TempDir::new().unwrap();
-    let session = spawn_test_mount(mount_dir.path()).await;
-
-    let handles: Vec<_> = (0..100).map(|i| {
-        let path = mount_dir.path().join(format!("Artist/Album/{:02} - Track.flac", i));
-        tokio::spawn(async move {
-            tokio::time::timeout(
-                Duration::from_secs(30),
-                tokio::fs::read(&path),
-            ).await
-        })
-    }).collect();
-
-    for handle in handles {
-        let result = handle.await.unwrap();
-        // Should complete (Ok or Err), never timeout
-        assert!(result.is_ok(), "read timed out — possible deadlock");
-    }
-
-    drop(session);
-}
-```
-
-**Layer**: 2 (requires FUSE mount — may need Docker/privileged in CI)
-
----
-
-#### tantivy Crash Recovery (Gap 5.2)
-
-```rust
-#[test]
-fn test_tantivy_survives_uncommitted_crash() {
-    let dir = TempDir::new().unwrap();
-
-    // Phase 1: write + commit, then write WITHOUT commit
-    {
-        let index = SearchIndex::open(dir.path()).unwrap();
-        index.index_file(&make_file_meta(1, "/a.flac", 1000)).unwrap();
-        index.commit().unwrap();
-
-        // This document is NOT committed
-        index.index_file(&make_file_meta(2, "/b.flac", 1000)).unwrap();
-
-        // Simulate crash — drop without commit
-        std::mem::forget(index);
-    }
-
-    // Phase 2: reopen and verify
-    let index = SearchIndex::open(dir.path()).unwrap();
-    let results = index.search("a", 10).unwrap();
-    assert_eq!(results.len(), 1); // Committed doc survives
-
-    let results = index.search("b", 10).unwrap();
-    assert_eq!(results.len(), 0); // Uncommitted doc lost — expected
-}
-```
-
-**Layer**: 1 (unit)
-
----
-
-#### File Descriptor Exhaustion (Gap 5.3)
-
-```rust
-#[test]
-#[cfg(target_os = "linux")]
-fn test_fd_exhaustion_handling() {
-    use rlimit::{Resource, setrlimit, getrlimit};
-
-    let (orig_soft, orig_hard) = getrlimit(Resource::NOFILE).unwrap();
-
-    // Set very low fd limit
-    setrlimit(Resource::NOFILE, 64, 64).unwrap();
-
-    // Try to open CAS store (uses sled + chunk files)
-    let dir = TempDir::new().unwrap();
-    let result = /* attempt CAS operations */;
-
-    // Should fail gracefully, not panic
-    // Restore limits
-    setrlimit(Resource::NOFILE, orig_soft, orig_hard).unwrap();
-}
-```
-
-**Layer**: 1 (unit, Linux-only)
-
----
-
-### Phase F: Cache Resilience
-
-#### CAS Chunk Corruption Auto-Repair (Gap 6.4)
-
-```rust
-#[tokio::test]
-async fn test_corrupt_chunk_auto_refetched() {
-    let dir = TempDir::new().unwrap();
-    let store = Arc::new(CasStore::open(/* ... */).await.unwrap());
-
-    // Store a valid chunk
-    let data = b"valid audio data";
-    let hash = store.put(data).await.unwrap();
-
-    // Corrupt the chunk file on disk
-    let chunk_path = store.chunk_path(&hash);
-    std::fs::write(&chunk_path, b"corrupted garbage").unwrap();
-
-    // Create reader with fetcher (has origin backup)
-    let reader = FileReader::with_fetcher(store, fetcher);
-
-    // Read should detect corruption, re-fetch from origin, and succeed
-    let result = reader.read(file_id, 0, data.len() as u32).await;
-    assert!(result.is_ok());
-    assert_eq!(&result.unwrap()[..], data);
-}
-
-#[tokio::test]
-async fn test_missing_chunk_triggers_origin_fetch() {
-    // Store chunk, then delete the file
-    let hash = store.put(b"data").await.unwrap();
-    let chunk_path = store.chunk_path(&hash);
-    std::fs::remove_file(&chunk_path).unwrap();
-
-    // Read should fetch from origin instead of returning EIO
-    let result = reader.read(file_id, 0, 4).await;
-    assert!(result.is_ok());
-}
-```
-
-**Layer**: 1 (unit)
-
----
-
-#### Passthrough Mode (Gap 6.6)
-
-```rust
-#[tokio::test]
-async fn test_passthrough_mode_when_cache_disk_dead() {
-    let cache_dir = TempDir::new().unwrap();
-    let origin_dir = TempDir::new().unwrap();
-    std::fs::write(origin_dir.path().join("test.flac"), b"audio data").unwrap();
-
-    // Setup system, then make cache dir read-only
-    let store = CasStore::open(/* cache_dir */).await.unwrap();
-
-    // Simulate cache disk failure
-    std::fs::set_permissions(
-        cache_dir.path(),
-        std::fs::Permissions::from_mode(0o444),
-    ).unwrap();
-
-    // CAS writes fail — system should enter passthrough mode
-    // Reads should go directly to origin
-    let result = reader.read(file_id, 0, 10).await;
-    assert!(result.is_ok());
-    assert_eq!(&result.unwrap()[..], b"audio data");
-
-    // Restore permissions for cleanup
-    std::fs::set_permissions(
-        cache_dir.path(),
-        std::fs::Permissions::from_mode(0o755),
-    ).unwrap();
-}
-```
-
-**Layer**: 1 (unit)
-
----
-
-## 5. Failpoints Instrumentation Map
-
-These are the production code locations that need `fail_point!` macros for testing:
-
-```rust
-// musicfs-cas/src/store.rs
-pub async fn put(&self, data: &[u8]) -> Result<ChunkHash, CasError> {
-    fail_point!("cas-put-before-write", |_| Err(CasError::Io(io::Error::new(
-        io::ErrorKind::Other, "ENOSPC"
-    ))));
-
-    fs::write(&path, data).await?;
-
-    fail_point!("cas-put-after-write-before-index", |_| Err(CasError::Io(io::Error::new(
-        io::ErrorKind::Other, "sled crash"
-    ))));
-
-    self.index.insert(hash, location)?;
-    Ok(hash)
-}
-
-// musicfs-cas/src/reader.rs
-async fn get_or_fetch_manifest(&self, file_id: FileId) -> Result<ChunkManifest, ReaderError> {
-    fail_point!("reader-manifest-fetch", |_| Err(ReaderError::ManifestNotFound(file_id)));
-    // ...
-}
-
-// musicfs-sync/src/delta.rs
-pub async fn detect_changes(&self, origin: &dyn Origin) -> Result<ChangeSet> {
-    fail_point!("delta-sync-after-batch", |_| Err(Error::SyncInterrupted));
-    // ...
-}
-
-// musicfs-origins/src/health.rs
-async fn check_one(&self, id: &OriginId, origin: &Arc<dyn Origin>) {
-    fail_point!("health-check-hang", |_| {
-        std::thread::sleep(Duration::from_secs(60)); // Simulate hang
-    });
-    // ...
-}
-
-// musicfs-cache/src/db.rs
-pub fn open(path: &Path) -> Result<Self> {
-    fail_point!("db-open-corrupt", |_| Err(Error::DatabaseCorrupted(
-        "injected corruption".into()
-    )));
-    // ...
-}
-```
-
----
-
-## 6. Integration Test Setup with Toxiproxy
-
-For network fault tolerance tests that need real protocol behavior:
+For Layer 3 network fault testing:
 
 ```yaml
-# tests/docker-compose.yml
+# tests/integration/docker-compose.yml
 services:
   toxiproxy:
     image: ghcr.io/shopify/toxiproxy:2.9.0
     ports:
-      - "8474:8474"
-      - "20000-20010:20000-20010"
+      - "8474:8474"          # Toxiproxy API
+      - "20000-20010:20000-20010"  # Proxy ports
 
   minio:
     image: minio/minio
@@ -924,6 +274,694 @@ services:
     command: test:test:::music
 ```
 
+Tests use `noxious-client` crate to configure Toxiproxy faults at runtime (latency injection, connection drops, bandwidth throttling).
+
+---
+
+## 5. Cross-Cutting Concerns
+
+### 5.1 Security & Privacy
+
+- Tests run without root — no kernel modules, no privileged containers for Layer 1/2
+- Layer 3 Docker tests use ephemeral containers with test credentials only
+- No real music files or user data in tests — synthetic `make_file_meta()` fixtures
+- `rlimit` tests restore original limits after test (cleanup in all code paths)
+
+### 5.2 Observability
+
+- Failpoint tests log injected faults via `tracing` — test failures include full trace context
+- Layer 2 (fork-kill) tests capture daemon stdout/stderr for failure diagnosis
+- Test coverage tracked per resilience issue (coverage matrix in Section 7)
+
+### 5.3 Scalability & Performance
+
+- Layer 1 tests: <10ms each, ~25 tests = <1s total
+- Layer 2 tests: ~2-5s each (process spawn + signal + verify), ~5 tests = <30s total
+- Layer 3 tests: ~5-10s each (Docker network), ~5 tests = <60s total
+- Full suite: <2 minutes including failpoint tests (sequential `--test-threads 1`)
+- Failpoint global state requires `--test-threads 1` for failpoint tests; all other tests parallelize normally
+
+### 5.4 Testing the Tests
+
+- Corruption tests self-validate: create known-good state → corrupt → verify detection
+- FaultyOrigin has mode assertions: `assert_eq!(origin.call_count(), expected)` to verify injection triggered
+- Failpoint tests verify both the error path AND the happy path (remove failpoint, retry, verify success)
+- Resource limit tests always restore original limits (even on panic — use scopeguard or Drop impl)
+
+---
+
+## 6. Alternatives Considered
+
+### 6.1 Jepsen / Full Chaos Engineering Framework
+
+**Rejected.** Jepsen tests distributed consensus under network partitions. MusicFS is a single-daemon filesystem — its failure modes are local (disk, signals, panics), not distributed. The 3-layer approach covers our actual failure surface with 10x less complexity.
+
+### 6.2 proptest / Property-Based Testing
+
+**Deferred.** Property-based testing (random input generation) is valuable for finding edge cases in path resolution, CDC chunking, and search queries. But it's orthogonal to resilience testing — it tests correctness under random input, not correctness under infrastructure failure. Can be added later without affecting this design.
+
+### 6.3 loom (Concurrency Model Checker)
+
+**Deferred.** loom exhaustively checks all possible thread interleavings for data races and deadlocks. It would be useful for the FUSE↔tokio deadlock issue (5.1) and RwLock poison issue (2.9). However, loom requires rewriting code to use `loom::sync` primitives and is very slow. Not practical for initial resilience coverage. Consider for Phase E hardening.
+
+### 6.4 In-Process Failure Injection Without Failpoints
+
+**Rejected.** Alternative: inject failures via trait-method overrides or runtime flags instead of the `fail` crate. This avoids a new dependency but requires modifying every function signature to accept an error injection parameter. Failpoints are cleaner — they're invisible in production (compiled out) and don't pollute the API surface.
+
+### 6.5 Mock Framework (mockall)
+
+**Rejected for now.** The codebase uses real implementations with TempDir isolation — this pattern is well-established across 43 test files. Introducing `mockall` would split the test codebase into two incompatible patterns. `FaultyOrigin` wrapper achieves the same result while staying consistent with existing patterns.
+
+---
+
+## 7. Implementation Plan
+
+### Phase 1: Test Infrastructure (Days 1-2.5)
+
+| Task | Effort | Deliverable |
+|------|--------|-------------|
+| Create `musicfs-test-utils` crate | 1 day | `FaultyOrigin`, `FaultyCasStore`, centralized fixtures |
+| Add `fail` crate, instrument 10 failpoints | 1 day | Failpoint macros in store.rs, reader.rs, delta.rs, health.rs, db.rs |
+| Setup test directory structure | 0.5 day | `tests/resilience/`, `tests/failpoints/`, `tests/integration/` |
+
+### Phase 2: Layer 1 Tests (Days 3-5.5)
+
+| Test Group | Tests | Effort | Can Write Now? |
+|------------|-------|--------|----------------|
+| Cache corruption (SQLite, sled, tantivy, CAS) | 4 | 0.5 day | ✅ Yes |
+| RwLock poison recovery | 2 | 0.25 day | ✅ Yes |
+| Health check timeout + parallel checks | 2 | 0.25 day | ✅ Yes |
+| tantivy crash recovery | 2 | 0.25 day | ✅ Yes |
+| fd exhaustion | 1 | 0.25 day | ✅ Yes |
+| Disk space / ENOSPC | 2 | 0.25 day | ✅ Yes |
+| Origin failover (FaultyOrigin) | 3 | 0.5 day | ✅ Yes |
+| Panic hook + task supervisor | 3 | 0.5 day | ❌ Needs implementation |
+| Shutdown orchestration | 3 | 0.5 day | ❌ Needs implementation |
+| sd_notify mock socket | 1 | 0.25 day | ❌ Needs implementation |
+| Passthrough mode | 1 | 0.25 day | ❌ Needs implementation |
+| Systemd service file assertions | 1 | 0.1 day | ✅ Yes |
+
+### Phase 3: Layer 2 Tests (Days 6-7)
+
+| Test | Effort | Requires |
+|------|--------|----------|
+| SIGTERM triggers clean shutdown | 0.25 day | Signal handler implementation |
+| SIGINT triggers clean shutdown | 0.1 day | Signal handler implementation |
+| Double-signal forces immediate exit | 0.1 day | Signal handler implementation |
+| Kill -9 + stale mount detection | 0.25 day | Stale mount detection implementation |
+| 100 concurrent FUSE reads (deadlock) | 0.25 day | FUSE mount in test (Docker or privileged) |
+
+### Phase 4: Layer 3 Tests (Days 8-9)
+
+| Task | Effort | Requires |
+|------|--------|----------|
+| Docker Compose setup (Toxiproxy + MinIO + SFTP) | 0.5 day | Docker |
+| S3 latency spike test | 0.25 day | S3 origin implementation |
+| S3 connection drop + failover | 0.25 day | S3 origin implementation |
+| SFTP connection drop + failover | 0.25 day | SFTP origin implementation |
+| Origin recovery after partition heal | 0.25 day | Docker |
+
+### Rollout
+
+1. **Phase 1 first** — test infrastructure is prerequisite for everything else
+2. **Phase 2 "write now" tests** — 11 tests that can be written before resilience implementation; they document expected behavior as executable specs (currently failing)
+3. **Phase 2 remaining** — written alongside resilience implementation (test-first development)
+4. **Phase 3** — after signal handling and shutdown are implemented
+5. **Phase 4** — after S3/SFTP origins are implemented; deferred if origins remain stubs
+
+---
+
+## 8. Coverage Matrix
+
+### 8.1 Issue → Test → Layer Mapping
+
+| Issue | Description | Layer | Test Approach | Write Now? |
+|-------|-------------|-------|--------------|------------|
+| 2.1 | Signal handling | 2 | Fork daemon + send SIGTERM/SIGINT | ❌ |
+| 2.2 | Panic hook | 1 | `catch_unwind` + log capture | ❌ |
+| 2.3 | Shutdown orchestration | 1+2 | CancellationToken + ordered teardown | ❌ |
+| 2.4 | Cache integrity on startup | 1 | Corrupt file bytes + reopen | ✅ |
+| 2.5 | Interrupted sync | 1 | Failpoint `delta-sync-after-batch` | ❌ |
+| 2.6 | Task supervisor | 1 | Spawn panicking task + verify restart | ❌ |
+| 2.7 | FUSE unmount on crash | 2 | Fork + kill -9 + check /proc/mounts | ❌ |
+| 2.8 | Disk space | 1 | Small `max_size` + oversized write | ✅ |
+| 2.9 | RwLock poison | 1 | Panic in writer thread + verify read | ✅ |
+| 2.10 | sd_notify | 1 | Mock Unix datagram socket | ❌ |
+| 3.1 | Watchdog | 1 | Mock sd_notify + verify WATCHDOG=1 | ❌ |
+| 3.5 | sled recovery | 1 | Corrupt sled files + reopen | ✅ |
+| 3.7 | ExecStop stub | 1 | Assert service file contains fusermount | ✅ |
+| 3.8 | FUSE read timeout | 1 | FaultyOrigin with TimeoutMs + verify EIO | ✅ |
+| 4.2.1 | Health check timeout | 1 | FaultyOrigin with 30s hang + timer | ✅ |
+| 4.2.2 | Parallel health checks | 1 | 3 origins (2 fast, 1 slow) + timer | ✅ |
+| 4.2.3 | Offline mode | 1 | All origins fail + verify state machine | ❌ |
+| 5.1 | FUSE↔tokio deadlock | 2 | 100 concurrent reads with timeout | ✅ |
+| 5.2 | tantivy crash | 1 | Write + `mem::forget` + reopen | ✅ |
+| 5.3 | fd exhaustion | 1 | `rlimit` NOFILE=64 + CAS operations | ✅ |
+| 5.7 | CAS atomic write | 1 | Failpoint between write and index | ❌ |
+| 6.3 | sled dies at runtime | 1 | Corrupt sled + verify EIO not panic | ✅ |
+| 6.4 | CAS chunk corruption | 1 | Overwrite chunk file + verify auto-repair | ✅ |
+| 6.6 | Passthrough mode | 1 | Read-only cache dir + verify origin read | ❌ |
+| Network | Origin failover | 1+3 | FaultyOrigin + Toxiproxy | ✅ (L1) |
+
+### 8.2 Summary
+
+- **Total test cases**: ~35
+- **Can write now** (before resilience implementation): 15
+- **Need implementation first**: 12
+- **Need Docker** (Layer 3 only): 5
+- **Need FUSE mount** (Layer 2): 3
+
+---
+
+## 9. Glossary / References
+
+### 9.1 Libraries
+
+| Library | Link | Purpose |
+|---------|------|---------|
+| `fail` (TiKV failpoints) | [github.com/tikv/fail-rs](https://github.com/tikv/fail-rs) | Conditional fault injection |
+| `rlimit` | [docs.rs/rlimit](https://docs.rs/rlimit) | Resource limit manipulation |
+| `nix` | [docs.rs/nix](https://docs.rs/nix) | POSIX signal sending |
+| `wiremock` | [docs.rs/wiremock](https://docs.rs/wiremock) | HTTP mock server |
+| `assert_cmd` | [docs.rs/assert_cmd](https://docs.rs/assert_cmd) | CLI process testing |
+| Toxiproxy | [github.com/Shopify/toxiproxy](https://github.com/Shopify/toxiproxy) | Network fault injection proxy |
+| `noxious-client` | [docs.rs/noxious-client](https://docs.rs/noxious-client) | Async Toxiproxy Rust client |
+
+### 9.2 References
+
+| Document | Path |
+|----------|------|
+| Resilience audit | [resilience-fault-tolerance.md](resilience-fault-tolerance.md) |
+| Persistent state plan | [persistent-state.md](persistent-state.md) |
+| Architecture | [architecture.md](../architecture.md) |
+| Requirements | [requirements.md](../requirements.md) |
+
+### 9.3 Glossary
+
+| Term | Definition |
+|------|------------|
+| **Failpoint** | A conditional injection point in production code, compiled out in release builds |
+| **FaultyOrigin** | Test wrapper around `Origin` trait that injects configurable errors |
+| **Layer 1** | In-process tests (trait mocks, failpoints) — fastest, no external deps |
+| **Layer 2** | Process-level tests (fork, signal, kill) — tests daemon lifecycle |
+| **Layer 3** | Network-level tests (Toxiproxy, Docker) — tests real protocol behavior |
+| **Passthrough mode** | Operating mode where cache is bypassed; reads go directly to origin |
+
+---
+
+## Appendix A: Test Code Examples
+
+Reference implementations for each test case. These serve as executable specifications — tests can be written before the resilience features are implemented (they will fail until the feature lands).
+
+### A.1 Signal Handling (Issue 2.1)
+
+```rust
+// tests/resilience/signal_handling.rs
+
+#[tokio::test]
+async fn test_sigterm_triggers_shutdown() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_musicfs"))
+        .args(["mount", "--origin", &test_dir, &mount_dir])
+        .spawn().unwrap();
+
+    wait_for_mount(&mount_dir).await;
+
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(child.id() as i32),
+        nix::sys::signal::Signal::SIGTERM,
+    ).unwrap();
+
+    let status = tokio::time::timeout(
+        Duration::from_secs(10), child.wait()
+    ).await.unwrap().unwrap();
+    assert!(status.success() || status.code() == Some(0));
+    assert!(!is_mounted(&mount_dir));
+}
+
+#[tokio::test]
+async fn test_double_signal_forces_immediate_exit() {
+    // Send SIGTERM, then SIGTERM again within 1s
+    // Verify daemon exits immediately on second signal
+}
+```
+
+### A.2 Panic Hook (Issue 2.2)
+
+```rust
+#[tokio::test]
+async fn test_panic_in_background_task_is_logged() {
+    let (subscriber, logs) = test_subscriber();
+
+    let handle = tokio::spawn(async {
+        panic!("test panic in background task");
+    });
+
+    let result = handle.await;
+    assert!(result.is_err());
+    assert!(logs.contains("test panic in background task"));
+}
+
+#[test]
+fn test_panic_hook_includes_backtrace() {
+    install_panic_hook();
+    let result = std::panic::catch_unwind(|| {
+        panic!("deliberate test panic");
+    });
+    assert!(result.is_err());
+}
+```
+
+### A.3 Graceful Shutdown Orchestration (Issue 2.3)
+
+```rust
+#[tokio::test]
+async fn test_shutdown_order() {
+    let events = Arc::new(Mutex::new(Vec::<String>::new()));
+    let token = CancellationToken::new();
+
+    let watcher_events = events.clone();
+    let watcher_token = token.clone();
+    tokio::spawn(async move {
+        watcher_token.cancelled().await;
+        watcher_events.lock().unwrap().push("watcher_stopped".into());
+    });
+
+    let indexer_events = events.clone();
+    let indexer_token = token.clone();
+    tokio::spawn(async move {
+        indexer_token.cancelled().await;
+        indexer_events.lock().unwrap().push("indexer_stopped".into());
+    });
+
+    token.cancel();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let order = events.lock().unwrap();
+    assert!(order.contains(&"watcher_stopped".to_string()));
+    assert!(order.contains(&"indexer_stopped".to_string()));
+}
+
+#[tokio::test]
+async fn test_shutdown_flushes_tantivy() {
+    let dir = TempDir::new().unwrap();
+    let index = SearchIndex::open(dir.path()).unwrap();
+    index.index_file(&make_file_meta(1, "/a.flac", 1000)).unwrap();
+    index.commit().unwrap();
+
+    let index2 = SearchIndex::open(dir.path()).unwrap();
+    let results = index2.search("a", 10).unwrap();
+    assert_eq!(results.len(), 1);
+}
+```
+
+### A.4 Cache Integrity on Startup (Issue 2.4)
+
+```rust
+#[tokio::test]
+async fn test_sqlite_integrity_check_detects_corruption() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+
+    {
+        let db = Database::open(&db_path).unwrap();
+        db.upsert_file(/* ... */).unwrap();
+    }
+
+    let mut data = std::fs::read(&db_path).unwrap();
+    if data.len() > 200 { data[100..200].fill(0xFF); }
+    std::fs::write(&db_path, &data).unwrap();
+
+    let result = Database::open_with_integrity_check(&db_path);
+    assert!(matches!(result, Err(Error::DatabaseCorrupted(_))));
+}
+
+#[tokio::test]
+async fn test_tantivy_corruption_triggers_rebuild() {
+    let dir = TempDir::new().unwrap();
+    {
+        let index = SearchIndex::open(dir.path()).unwrap();
+        index.index_file(&make_file_meta(1, "/a.flac", 1000)).unwrap();
+        index.commit().unwrap();
+    }
+
+    std::fs::write(dir.path().join("meta.json"), b"corrupted").unwrap();
+
+    let index = SearchIndex::open_with_recovery(dir.path()).unwrap();
+    let results = index.search("a", 10).unwrap();
+    assert_eq!(results.len(), 0); // Rebuilt empty but functional
+}
+
+#[tokio::test]
+async fn test_sled_corruption_triggers_repair() {
+    let dir = TempDir::new().unwrap();
+    let config = CasConfig { chunks_dir: dir.path().join("chunks"), ..Default::default() };
+
+    {
+        let store = CasStore::open(config.clone()).await.unwrap();
+        store.put(b"test data").await.unwrap();
+    }
+
+    for entry in std::fs::read_dir(dir.path().join("chunks/index.sled")).unwrap() {
+        let entry = entry.unwrap();
+        if entry.path().extension().is_some() {
+            std::fs::write(entry.path(), b"corrupted").unwrap();
+        }
+    }
+
+    let result = CasStore::open(config).await;
+    // Either succeeds with repair, or returns clear error
+}
+```
+
+### A.5 Interrupted Sync Recovery (Issue 2.5)
+
+```rust
+#[tokio::test]
+#[cfg(feature = "failpoints")]
+async fn test_sync_resumes_after_crash() {
+    let dir = TempDir::new().unwrap();
+
+    fail::cfg("delta-sync-after-batch", "50*off->return").unwrap();
+    let detector = DeltaDetector::new(dir.path());
+    let result = detector.detect_changes(&origin).await;
+    assert!(result.is_err());
+
+    fail::remove("delta-sync-after-batch");
+    let result = detector.detect_changes(&origin).await;
+    assert!(result.is_ok());
+}
+```
+
+### A.6 Task Supervisor (Issue 2.6)
+
+```rust
+#[tokio::test]
+async fn test_task_supervisor_detects_panic() {
+    let supervisor = TaskSupervisor::new();
+    supervisor.spawn_supervised("test_task", async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        panic!("deliberate task panic");
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let status = supervisor.task_status("test_task");
+    assert!(matches!(status, TaskStatus::Failed { .. }));
+}
+
+#[tokio::test]
+async fn test_task_supervisor_restarts_critical_task() {
+    let call_count = Arc::new(AtomicU32::new(0));
+    let count = call_count.clone();
+
+    let supervisor = TaskSupervisor::new();
+    supervisor.spawn_critical("health_monitor", move || {
+        let count = count.clone();
+        async move {
+            count.fetch_add(1, Ordering::SeqCst);
+            if count.load(Ordering::SeqCst) == 1 {
+                panic!("first run fails");
+            }
+            loop { tokio::time::sleep(Duration::from_secs(60)).await; }
+        }
+    });
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(call_count.load(Ordering::SeqCst), 2);
+    assert!(matches!(supervisor.task_status("health_monitor"), TaskStatus::Running));
+}
+```
+
+### A.7 FUSE Unmount on Crash (Issue 2.7)
+
+```rust
+#[test]
+fn test_systemd_service_has_execstoppost() {
+    let service = std::fs::read_to_string("dist/musicfs.service").unwrap();
+    assert!(service.contains("ExecStopPost"));
+    assert!(service.contains("fusermount"));
+}
+```
+
+### A.8 Disk Space Handling (Issue 2.8)
+
+```rust
+#[tokio::test]
+async fn test_cas_put_handles_enospc() {
+    let dir = TempDir::new().unwrap();
+    let config = CasConfig {
+        chunks_dir: dir.path().join("chunks"),
+        max_size: 1024,
+        ..Default::default()
+    };
+    let store = CasStore::open(config).await.unwrap();
+
+    let big_data = vec![0u8; 2048];
+    let result = store.put(&big_data).await;
+    assert!(result.is_err() || store.current_size() <= 1024);
+}
+```
+
+### A.9 RwLock Poison Recovery (Issue 2.9)
+
+```rust
+#[test]
+fn test_poisoned_tree_lock_returns_eio_not_panic() {
+    let tree = Arc::new(std::sync::RwLock::new(VirtualTree::new()));
+
+    let tree_clone = tree.clone();
+    let _ = std::thread::spawn(move || {
+        let _guard = tree_clone.write().unwrap();
+        panic!("poisoning the lock");
+    }).join();
+
+    assert!(tree.read().is_err());
+}
+
+#[test]
+fn test_parking_lot_rwlock_survives_panic() {
+    let tree = Arc::new(parking_lot::RwLock::new(VirtualTree::new()));
+
+    let tree_clone = tree.clone();
+    let _ = std::thread::spawn(move || {
+        let _guard = tree_clone.write();
+        panic!("writer panic");
+    }).join();
+
+    let guard = tree.read();
+    assert!(guard.get(ROOT_INODE).is_some());
+}
+```
+
+### A.10 sd_notify Integration (Issue 2.10)
+
+```rust
+#[test]
+fn test_sd_notify_ready_sent() {
+    let dir = TempDir::new().unwrap();
+    let socket_path = dir.path().join("notify.sock");
+    std::env::set_var("NOTIFY_SOCKET", &socket_path);
+
+    let listener = std::os::unix::net::UnixDatagram::bind(&socket_path).unwrap();
+    sd_notify::notify(false, &[sd_notify::NotifyState::Ready]).unwrap();
+
+    let mut buf = [0u8; 256];
+    let n = listener.recv(&mut buf).unwrap();
+    let msg = std::str::from_utf8(&buf[..n]).unwrap();
+    assert!(msg.contains("READY=1"));
+}
+```
+
+### A.11 Origin Failover (Issues 4.2.1, 4.2.2)
+
+```rust
+#[tokio::test]
+async fn test_failover_on_primary_death() {
+    let primary = Arc::new(FaultyOrigin::new(
+        LocalOrigin::new("primary", &primary_dir),
+        FailMode::ReturnError(io::ErrorKind::ConnectionRefused),
+    ));
+    let secondary = Arc::new(LocalOrigin::new("secondary", &secondary_dir));
+
+    let registry = OriginRegistry::new(/* ... */);
+    registry.register(primary, 1);
+    registry.register(secondary, 2);
+
+    let executor = FailoverExecutor::new(registry, RetryConfig::default());
+    let result = executor.read_with_failover(&path, 0, 100).await;
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn test_origin_recovery_resumes_routing() {
+    let origin = Arc::new(FaultyOrigin::new(
+        LocalOrigin::new("test", &dir),
+        FailMode::FailAfterN(0),
+    ));
+
+    monitor.add_origin(origin.clone());
+    monitor.check_now(&id).await;
+    assert!(monitor.snapshot().is_unhealthy(&id));
+
+    origin.set_mode(FailMode::Healthy);
+    monitor.check_now(&id).await;
+    assert!(monitor.snapshot().is_healthy(&id));
+}
+
+#[tokio::test]
+async fn test_local_origin_health_check_has_timeout() {
+    let origin = Arc::new(FaultyOrigin::new(
+        LocalOrigin::new("slow", &dir),
+        FailMode::TimeoutMs(30_000),
+    ));
+
+    let monitor = HealthMonitor::new(Duration::from_secs(30));
+    monitor.add_origin(origin);
+
+    let start = Instant::now();
+    monitor.check_now(&OriginId::from("slow")).await;
+    assert!(start.elapsed() < Duration::from_secs(10));
+    assert!(monitor.snapshot().is_unhealthy(&OriginId::from("slow")));
+}
+
+#[tokio::test]
+async fn test_health_checks_run_in_parallel() {
+    let monitor = HealthMonitor::new(Duration::from_secs(30));
+    monitor.add_origin(healthy_origin_1);
+    monitor.add_origin(healthy_origin_2);
+    monitor.add_origin(dead_origin);
+
+    let start = Instant::now();
+    monitor.check_all().await;
+    assert!(start.elapsed() < Duration::from_secs(8));
+
+    let snapshot = monitor.snapshot();
+    assert!(snapshot.is_healthy(&healthy_1_id));
+    assert!(snapshot.is_healthy(&healthy_2_id));
+}
+```
+
+### A.12 FUSE↔tokio Deadlock (Issue 5.1)
+
+```rust
+#[tokio::test]
+async fn test_concurrent_fuse_reads_dont_deadlock() {
+    let mount_dir = TempDir::new().unwrap();
+    let session = spawn_test_mount(mount_dir.path()).await;
+
+    let handles: Vec<_> = (0..100).map(|i| {
+        let path = mount_dir.path().join(format!("Artist/Album/{:02} - Track.flac", i));
+        tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(30), tokio::fs::read(&path)).await
+        })
+    }).collect();
+
+    for handle in handles {
+        let result = handle.await.unwrap();
+        assert!(result.is_ok(), "read timed out — possible deadlock");
+    }
+    drop(session);
+}
+```
+
+### A.13 tantivy Crash Recovery (Issue 5.2)
+
+```rust
+#[test]
+fn test_tantivy_survives_uncommitted_crash() {
+    let dir = TempDir::new().unwrap();
+
+    {
+        let index = SearchIndex::open(dir.path()).unwrap();
+        index.index_file(&make_file_meta(1, "/a.flac", 1000)).unwrap();
+        index.commit().unwrap();
+        index.index_file(&make_file_meta(2, "/b.flac", 1000)).unwrap();
+        std::mem::forget(index); // Simulate crash
+    }
+
+    let index = SearchIndex::open(dir.path()).unwrap();
+    assert_eq!(index.search("a", 10).unwrap().len(), 1); // Committed survives
+    assert_eq!(index.search("b", 10).unwrap().len(), 0); // Uncommitted lost
+}
+```
+
+### A.14 File Descriptor Exhaustion (Issue 5.3)
+
+```rust
+#[test]
+#[cfg(target_os = "linux")]
+fn test_fd_exhaustion_handling() {
+    use rlimit::{Resource, setrlimit, getrlimit};
+
+    let (orig_soft, orig_hard) = getrlimit(Resource::NOFILE).unwrap();
+    setrlimit(Resource::NOFILE, 64, 64).unwrap();
+
+    let dir = TempDir::new().unwrap();
+    // Attempt CAS operations under tight fd limit
+    // Should fail gracefully, not panic
+
+    setrlimit(Resource::NOFILE, orig_soft, orig_hard).unwrap();
+}
+```
+
+### A.15 CAS Chunk Corruption + Auto-Repair (Issue 6.4)
+
+```rust
+#[tokio::test]
+async fn test_corrupt_chunk_auto_refetched() {
+    let dir = TempDir::new().unwrap();
+    let store = Arc::new(CasStore::open(/* ... */).await.unwrap());
+
+    let data = b"valid audio data";
+    let hash = store.put(data).await.unwrap();
+
+    let chunk_path = store.chunk_path(&hash);
+    std::fs::write(&chunk_path, b"corrupted garbage").unwrap();
+
+    let reader = FileReader::with_fetcher(store, fetcher);
+    let result = reader.read(file_id, 0, data.len() as u32).await;
+    assert!(result.is_ok());
+    assert_eq!(&result.unwrap()[..], data);
+}
+
+#[tokio::test]
+async fn test_missing_chunk_triggers_origin_fetch() {
+    let hash = store.put(b"data").await.unwrap();
+    std::fs::remove_file(store.chunk_path(&hash)).unwrap();
+
+    let result = reader.read(file_id, 0, 4).await;
+    assert!(result.is_ok());
+}
+```
+
+### A.16 Passthrough Mode (Issue 6.6)
+
+```rust
+#[tokio::test]
+async fn test_passthrough_mode_when_cache_disk_dead() {
+    let cache_dir = TempDir::new().unwrap();
+    let origin_dir = TempDir::new().unwrap();
+    std::fs::write(origin_dir.path().join("test.flac"), b"audio data").unwrap();
+
+    let store = CasStore::open(/* cache_dir */).await.unwrap();
+
+    std::fs::set_permissions(
+        cache_dir.path(),
+        std::fs::Permissions::from_mode(0o444),
+    ).unwrap();
+
+    let result = reader.read(file_id, 0, 10).await;
+    assert!(result.is_ok());
+    assert_eq!(&result.unwrap()[..], b"audio data");
+
+    std::fs::set_permissions(
+        cache_dir.path(),
+        std::fs::Permissions::from_mode(0o755),
+    ).unwrap();
+}
+```
+
+### A.17 Toxiproxy Network Fault Tests (Layer 3)
+
 ```rust
 // tests/integration/network_faults.rs
 
@@ -932,15 +970,12 @@ services:
 async fn test_s3_origin_survives_latency_spike() {
     let toxi = noxious_client::Client::new("http://localhost:8474");
 
-    // Create proxy: client → toxiproxy:20000 → minio:9000
     let proxy = toxi.create_proxy("minio", "0.0.0.0:20000", "minio:9000").await.unwrap();
 
-    // Normal operation
     let origin = S3Origin::new("http://localhost:20000", "test-bucket");
     let data = origin.read(Path::new("/test.flac"), 0, 100).await.unwrap();
     assert!(!data.is_empty());
 
-    // Inject 5s latency
     proxy.add_toxic(&Toxic {
         name: "latency".into(),
         kind: ToxicKind::Latency { latency: 5000, jitter: 0 },
@@ -948,13 +983,10 @@ async fn test_s3_origin_survives_latency_spike() {
         toxicity: 1.0,
     }).await.unwrap();
 
-    // Read should timeout (if 30s timeout implemented) or succeed slowly
     let start = Instant::now();
     let result = origin.read(Path::new("/test.flac"), 0, 100).await;
-    // Should not take >35s (timeout + buffer)
     assert!(start.elapsed() < Duration::from_secs(35));
 
-    // Remove toxic and verify recovery
     proxy.remove_toxic("latency").await.unwrap();
     let data = origin.read(Path::new("/test.flac"), 0, 100).await.unwrap();
     assert!(!data.is_empty());
@@ -969,105 +1001,3 @@ async fn test_origin_connection_drop_triggers_failover() {
     // Remove toxic → verify: primary re-enabled on next health check
 }
 ```
-
----
-
-## 7. Test Organization
-
-```
-musicfs/
-├── crates/
-│   └── musicfs-test-utils/       # NEW — shared test helpers
-│       ├── Cargo.toml
-│       └── src/
-│           ├── lib.rs
-│           ├── faulty_origin.rs   # FaultyOrigin with FailMode
-│           ├── faulty_cas.rs      # FaultyCasStore
-│           ├── fixtures.rs        # make_file_meta, setup_test_cas, etc.
-│           └── assertions.rs      # Custom assertions
-├── tests/
-│   ├── resilience/                # NEW — resilience test suite
-│   │   ├── mod.rs
-│   │   ├── signal_handling.rs     # SIGTERM/SIGINT tests
-│   │   ├── crash_recovery.rs      # Fork-kill + state verification
-│   │   ├── cache_corruption.rs    # SQLite/sled/tantivy/CAS corruption
-│   │   ├── disk_failure.rs        # ENOSPC, permissions, passthrough
-│   │   ├── resource_limits.rs     # fd exhaustion, memory limits
-│   │   └── lock_poisoning.rs      # RwLock poison recovery
-│   ├── failpoints/                # NEW — failpoint-gated tests
-│   │   ├── mod.rs
-│   │   ├── origin_failures.rs     # Injected origin errors
-│   │   ├── sync_interruption.rs   # Delta sync crash/resume
-│   │   └── cas_failures.rs        # CAS write failures
-│   ├── integration/               # NEW — network integration (Docker)
-│   │   ├── docker-compose.yml
-│   │   ├── network_faults.rs      # Toxiproxy tests
-│   │   └── origin_failover.rs     # Multi-origin integration
-│   └── e2e/
-│       └── e2e_players.rs         # Existing (unchanged)
-```
-
-**Running**:
-```bash
-# Fast unit + resilience tests (no Docker, no FUSE)
-cargo test --lib --tests resilience
-
-# Failpoint tests (sequential, feature-gated)
-cargo test --features failpoints --test failpoints -- --test-threads 1
-
-# Network integration (requires docker-compose up)
-cargo test --test integration -- --ignored
-
-# Everything
-cargo nextest run --features failpoints
-```
-
----
-
-## 8. Coverage Matrix
-
-| Resilience Issue | Layer | Test Type | Blocks On |
-|---|---|---|---|
-| **2.1** Signal handling | 2 | Fork + signal | Implementation |
-| **2.2** Panic hook | 1 | Unit | Implementation |
-| **2.3** Shutdown orchestration | 1+2 | Unit + fork | 2.1 |
-| **2.4** Cache integrity | 1 | Corruption + reopen | — |
-| **2.5** Sync recovery | 1 | Failpoints | Implementation |
-| **2.6** Task supervisor | 1 | Spawn + panic + verify | Implementation |
-| **2.7** FUSE unmount | 2 | Fork + kill -9 | 2.1 |
-| **2.8** Disk space | 1 | rlimit / small max_size | — |
-| **2.9** RwLock poison | 1 | Deliberate poison | — |
-| **2.10** sd_notify | 1 | Mock socket | Implementation |
-| **3.1** Watchdog | 1 | Mock sd_notify | 2.10 |
-| **3.5** sled recovery | 1 | Corrupt + reopen | — |
-| **3.7** ExecStop | 1 | Service file assertion | — |
-| **3.8** FUSE read timeout | 1 | FaultyOrigin + timeout | — |
-| **4.2.1** Health timeout | 1 | FaultyOrigin + timer | — |
-| **4.2.2** Parallel checks | 1 | Multiple origins + timer | — |
-| **4.2.3** Offline mode | 1 | All origins fail + state check | Implementation |
-| **5.1** FUSE↔tokio deadlock | 2 | 100 concurrent reads | FUSE mount |
-| **5.2** tantivy crash | 1 | Write + forget + reopen | — |
-| **5.3** fd exhaustion | 1 | rlimit | Linux only |
-| **5.7** CAS atomic write | 1 | Failpoint between write + index | — |
-| **6.3** sled dies | 1 | Corrupt + reopen | — |
-| **6.4** CAS corruption | 1 | Corrupt chunk + read | — |
-| **6.6** Passthrough mode | 1 | Read-only cache dir | Implementation |
-| **Network failover** | 1+3 | FaultyOrigin + Toxiproxy | Docker for Layer 3 |
-
-**Tests that can be written NOW** (before implementation): 2.4, 2.9, 3.5, 3.7, 3.8, 4.2.1, 4.2.2, 5.2, 5.3, 6.3, 6.4
-
-**Tests that need implementation first**: 2.1, 2.2, 2.3, 2.5, 2.6, 2.7, 2.10, 4.2.3, 6.6
-
----
-
-## 9. Estimated Effort
-
-| Task | Effort |
-|---|---|
-| Create `musicfs-test-utils` crate (FaultyOrigin, fixtures) | 1.5 days |
-| Add `fail` crate + instrument 10 failpoints | 1 day |
-| Write Layer 1 resilience tests (~25 tests) | 3 days |
-| Write Layer 2 fork-kill tests (~5 tests) | 1 day |
-| Setup Docker Compose + Toxiproxy integration | 1 day |
-| Write Layer 3 network tests (~5 tests) | 1.5 days |
-| **Total** | **~9 days** |
