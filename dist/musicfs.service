@@ -1,0 +1,11 @@
+[Unit]
+Description=MusicFS - Virtual FUSE Filesystem for Music
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/musicfs mount /mnt/music --origin /path/to/music
+ExecStopPost=/usr/bin/fusermount -u /mnt/music
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

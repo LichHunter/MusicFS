@@ -13,7 +13,6 @@ rustPlatform.buildRustPackage (finalAttrs: {
   cargoLock = {
     lockFile = ./Cargo.lock;
   };
-  cargoHash = lib.fakeHash;
 
   nativeBuildInputs = with pkgs; [ 
     pkg-config 

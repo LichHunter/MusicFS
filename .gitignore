@@ -18,7 +18,6 @@ result
 .cargo/
 .direnv/
 .pre-commit-config.yaml
-dist/
 
 ###
 # Rust

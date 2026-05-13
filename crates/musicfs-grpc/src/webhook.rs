@@ -277,7 +277,7 @@ mod tests {
 
     #[test]
     fn test_event_type_name() {
-        let handler = WebhookHandler::new(vec![]);
+        let handler = WebhookHandler::new(vec![]).unwrap();
 
         let event = Event::SyncStarted {
             origin_id: OriginId::from("test"),
@@ -287,7 +287,7 @@ mod tests {
 
     #[test]
     fn test_matches_filter_empty() {
-        let handler = WebhookHandler::new(vec![]);
+        let handler = WebhookHandler::new(vec![]).unwrap();
         let config = WebhookConfig {
             url: "http://example.com".to_string(),
             secret: None,
@@ -304,7 +304,7 @@ mod tests {
 
     #[test]
     fn test_matches_filter_specific() {
-        let handler = WebhookHandler::new(vec![]);
+        let handler = WebhookHandler::new(vec![]).unwrap();
         let config = WebhookConfig {
             url: "http://example.com".to_string(),
             secret: None,
