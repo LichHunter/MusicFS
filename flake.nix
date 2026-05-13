@@ -38,7 +38,12 @@
       inherit pre-commit-check;
     };
 
-    devShells.default = pkgs.mkShell rec {
+    packages = rec {
+        musicfs = pkgs.callPackage ./package.nix { };
+        default = musicfs;
+    };
+
+    devShells.default = pkgs.mkShell {
       inherit (pre-commit-check) shellHook;
 
       buildInputs = with pkgs; [
