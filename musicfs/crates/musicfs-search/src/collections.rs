@@ -2,7 +2,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::{Duration, SystemTime};
-use tracing::warn;
+use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SmartCollection {
@@ -103,6 +103,7 @@ impl CollectionStore {
             [],
         )?;
 
+        info!(path = ?db_path, "Collection store opened");
         Ok(Self { db: Mutex::new(db) })
     }
 
@@ -111,6 +112,7 @@ impl CollectionStore {
         name: &str,
         query: CollectionQuery,
     ) -> Result<SmartCollection, CollectionError> {
+        info!(name = %name, "Creating collection");
         let query_json = serde_json::to_string(&query)?;
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -124,6 +126,7 @@ impl CollectionStore {
         )?;
 
         let id = db.last_insert_rowid();
+        debug!(id = id, name = %name, "Collection created");
 
         Ok(SmartCollection {
             id,
@@ -199,6 +202,7 @@ impl CollectionStore {
     }
 
     pub fn delete(&self, name: &str) -> Result<(), CollectionError> {
+        info!(name = %name, "Deleting collection");
         let db = self.db.lock();
         db.execute("DELETE FROM collections WHERE name = ?1", [name])?;
         Ok(())

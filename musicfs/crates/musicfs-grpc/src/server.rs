@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
-use tracing::{debug, info};
+use tracing::{debug, info, instrument};
 
 pub struct MusicFsServer {
     start_time: Instant,
@@ -206,10 +206,12 @@ impl MusicFs for MusicFsServer {
         ))
     }
 
+    #[instrument(level = "debug", skip(self, _request), fields(method = "get_status"))]
     async fn get_status(
         &self,
         _request: Request<Empty>,
     ) -> Result<Response<StatusResponse>, Status> {
+        debug!("gRPC get_status called");
         let uptime = self.start_time.elapsed().as_secs();
 
         Ok(Response::new(StatusResponse {
@@ -225,23 +227,27 @@ impl MusicFs for MusicFsServer {
         }))
     }
 
+    #[instrument(level = "info", skip(self, request), fields(method = "shutdown"))]
     async fn shutdown(
         &self,
         request: Request<ShutdownRequest>,
     ) -> Result<Response<Empty>, Status> {
         let req = request.into_inner();
         info!(
-            "Shutdown requested (graceful={}, timeout={}s)",
-            req.graceful, req.timeout_secs
+            graceful = req.graceful,
+            timeout_secs = req.timeout_secs,
+            "gRPC shutdown requested"
         );
 
         Ok(Response::new(Empty {}))
     }
 
+    #[instrument(level = "debug", skip(self, _request), fields(method = "get_cache_stats"))]
     async fn get_cache_stats(
         &self,
         _request: Request<Empty>,
     ) -> Result<Response<CacheStats>, Status> {
+        debug!("gRPC get_cache_stats called");
         Ok(Response::new(CacheStats {
             total_size_bytes: 0,
             used_size_bytes: 0,
@@ -275,14 +281,17 @@ impl MusicFs for MusicFsServer {
         }))
     }
 
+    #[instrument(level = "info", skip(self, request), fields(method = "clear_cache"))]
     async fn clear_cache(
         &self,
         request: Request<ClearCacheRequest>,
     ) -> Result<Response<ClearCacheResponse>, Status> {
         let req = request.into_inner();
-        debug!(
-            "Clear cache requested: origin={:?}, metadata={}, chunks={}",
-            req.origin_id, req.clear_metadata, req.clear_chunks
+        info!(
+            origin_id = ?req.origin_id,
+            clear_metadata = req.clear_metadata,
+            clear_chunks = req.clear_chunks,
+            "gRPC clear_cache"
         );
 
         Ok(Response::new(ClearCacheResponse {
@@ -293,12 +302,14 @@ impl MusicFs for MusicFsServer {
 
     type PrefetchStream = ReceiverStream<Result<PrefetchProgress, Status>>;
 
+    #[instrument(level = "debug", skip(self, request), fields(method = "prefetch"))]
     async fn prefetch(
         &self,
         request: Request<PrefetchRequest>,
     ) -> Result<Response<Self::PrefetchStream>, Status> {
         let req = request.into_inner();
         let total = req.paths.len() as u32;
+        debug!(file_count = total, "gRPC prefetch started");
 
         let (tx, rx) = mpsc::channel(32);
 
@@ -319,18 +330,22 @@ impl MusicFs for MusicFsServer {
         Ok(Response::new(ReceiverStream::new(rx)))
     }
 
+    #[instrument(level = "debug", skip(self, _request), fields(method = "list_origins"))]
     async fn list_origins(
         &self,
         _request: Request<Empty>,
     ) -> Result<Response<OriginsResponse>, Status> {
+        debug!("gRPC list_origins called");
         Ok(Response::new(OriginsResponse { origins: vec![] }))
     }
 
+    #[instrument(level = "debug", skip(self, request), fields(method = "get_origin_health"))]
     async fn get_origin_health(
         &self,
         request: Request<OriginRequest>,
     ) -> Result<Response<OriginHealthResponse>, Status> {
         let req = request.into_inner();
+        debug!(origin_id = %req.origin_id, "gRPC get_origin_health");
 
         Ok(Response::new(OriginHealthResponse {
             origin_id: req.origin_id,
@@ -342,12 +357,13 @@ impl MusicFs for MusicFsServer {
 
     type RescanOriginStream = ReceiverStream<Result<SyncProgress, Status>>;
 
+    #[instrument(level = "info", skip(self, request), fields(method = "rescan_origin"))]
     async fn rescan_origin(
         &self,
         request: Request<OriginRequest>,
     ) -> Result<Response<Self::RescanOriginStream>, Status> {
         let req = request.into_inner();
-        info!("Rescan requested for origin: {}", req.origin_id);
+        info!(origin_id = %req.origin_id, "gRPC rescan_origin started");
 
         let (tx, rx) = mpsc::channel(32);
 
@@ -373,19 +389,32 @@ impl MusicFs for MusicFsServer {
 
     type SubscribeEventsStream = ReceiverStream<Result<Event, Status>>;
 
+    #[instrument(level = "info", skip(self, request), fields(method = "subscribe_events"))]
     async fn subscribe_events(
         &self,
         request: Request<EventFilter>,
     ) -> Result<Response<Self::SubscribeEventsStream>, Status> {
+        info!("gRPC subscribe_events: client connected");
         let filter = request.into_inner();
         let mut rx = self.event_bus.subscribe();
         let (tx, out_rx) = mpsc::channel(100);
 
         tokio::spawn(async move {
-            while let Ok(event) = rx.recv().await {
-                if Self::matches_filter(&event, &filter) {
-                    let proto_event = Self::event_to_proto(&event);
-                    if tx.send(Ok(proto_event)).await.is_err() {
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        if Self::matches_filter(&event, &filter) {
+                            let proto_event = Self::event_to_proto(&event);
+                            if tx.send(Ok(proto_event)).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(skipped = n, "Event subscriber lagged, skipped events");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        tracing::debug!("Event channel closed");
                         break;
                     }
                 }

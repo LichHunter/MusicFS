@@ -2,7 +2,7 @@ use crate::index::{SearchError, SearchIndex};
 use musicfs_core::{Event, EventBus, FileMeta};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 
 pub trait MetadataLookup: Send + Sync {
     fn lookup(&self, path: &musicfs_core::VirtualPath) -> Option<FileMeta>;
@@ -31,43 +31,52 @@ impl<M: MetadataLookup + 'static> Indexer<M> {
         let (stop_tx, mut stop_rx) = mpsc::channel::<()>(1);
         let mut event_rx = self.event_bus.subscribe();
 
-        tokio::spawn(async move {
-            let mut pending_commit = false;
-            let mut commit_timer = tokio::time::interval(std::time::Duration::from_secs(5));
+        info!("Search indexer starting");
 
-            loop {
-                tokio::select! {
-                    result = event_rx.recv() => {
-                        match result {
-                            Ok(event) => {
-                                if let Err(e) = self.handle_event(&event) {
-                                    error!("Indexer error: {}", e);
+        tokio::spawn(
+            async move {
+                let mut pending_commit = false;
+                let mut commit_timer = tokio::time::interval(std::time::Duration::from_secs(5));
+
+                loop {
+                    tokio::select! {
+                        result = event_rx.recv() => {
+                            match result {
+                                Ok(event) => {
+                                    if let Err(e) = self.handle_event(&event) {
+                                        error!("Indexer error: {}", e);
+                                    }
+                                    pending_commit = true;
                                 }
-                                pending_commit = true;
-                            }
-                            Err(e) => {
-                                warn!("Event receive error: {}", e);
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                    warn!(skipped = n, "Indexer lagged, skipped events");
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                    debug!("Event channel closed");
+                                    break;
+                                }
                             }
                         }
-                    }
-                    _ = commit_timer.tick() => {
-                        if pending_commit {
-                            if let Err(e) = self.index.commit() {
-                                error!("Index commit error: {}", e);
+                        _ = commit_timer.tick() => {
+                            if pending_commit {
+                                if let Err(e) = self.index.commit() {
+                                    error!("Index commit error: {}", e);
+                                }
+                                pending_commit = false;
                             }
-                            pending_commit = false;
                         }
-                    }
-                    _ = stop_rx.recv() => {
-                        info!("Indexer stopping");
-                        if pending_commit {
-                            let _ = self.index.commit();
+                        _ = stop_rx.recv() => {
+                            info!("Indexer stopping");
+                            if pending_commit {
+                                let _ = self.index.commit();
+                            }
+                            break;
                         }
-                        break;
                     }
                 }
             }
-        });
+            .instrument(info_span!("search_indexer")),
+        );
 
         IndexerHandle { stop_tx }
     }

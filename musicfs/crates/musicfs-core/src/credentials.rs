@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use thiserror::Error;
+use tracing::{debug, info, trace, warn};
 
 #[derive(Clone)]
 pub struct CredentialStore {
@@ -106,15 +107,35 @@ impl CredentialStore {
         origin_id: &str,
         config: &CredentialConfig,
     ) -> Result<Credential, CredentialError> {
+        debug!(origin_id = %origin_id, "Loading credentials");
+
         if let Some(cred) = self.cache.get(origin_id) {
+            trace!(origin_id = %origin_id, "Credential cache hit");
             return Ok(cred.clone());
         }
 
         let cred = match config {
-            CredentialConfig::Environment { prefix } => self.load_from_env(prefix)?,
-            CredentialConfig::File { path } => self.load_from_file(path)?,
-            CredentialConfig::Inline(cred) => cred.clone(),
+            CredentialConfig::Environment { prefix } => {
+                trace!(origin_id = %origin_id, prefix = %prefix, "Loading from environment");
+                self.load_from_env(prefix)?
+            }
+            CredentialConfig::File { path } => {
+                trace!(origin_id = %origin_id, path = ?path, "Loading from file");
+                self.load_from_file(path)?
+            }
+            CredentialConfig::Inline(cred) => {
+                trace!(origin_id = %origin_id, "Using inline credential");
+                cred.clone()
+            }
         };
+
+        let cred_type = match &cred {
+            Credential::Basic { .. } => "Basic",
+            Credential::AwsKey { .. } => "AwsKey",
+            Credential::SshKey { .. } => "SshKey",
+            Credential::EnvVar { .. } => "EnvVar",
+        };
+        info!(origin_id = %origin_id, cred_type = %cred_type, "Credential loaded");
 
         self.cache.insert(origin_id.to_string(), cred.clone());
         Ok(cred)
@@ -144,6 +165,7 @@ impl CredentialStore {
             });
         }
 
+        warn!(prefix = %prefix, "No credentials found in environment");
         Err(CredentialError::NotFound(format!(
             "No credentials found with prefix {}",
             prefix

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info};
+use tracing::{error, info, info_span, trace, Instrument};
 
 const DEBOUNCE_MS: u64 = 200;
 
@@ -31,11 +31,15 @@ impl OriginWatcher {
         let root = self.root.clone();
         let event_bus = self.event_bus.clone();
 
-        tokio::spawn(async move {
-            if let Err(e) = Self::watch_loop(&origin_id, &root, &event_bus, &mut stop_rx).await {
-                error!("Watcher error: {}", e);
+        let origin_id_str = origin_id.to_string();
+        tokio::spawn(
+            async move {
+                if let Err(e) = Self::watch_loop(&origin_id, &root, &event_bus, &mut stop_rx).await {
+                    error!("Watcher error: {}", e);
+                }
             }
-        });
+            .instrument(info_span!("file_watcher", origin_id = %origin_id_str)),
+        );
 
         WatchHandle { stop_tx }
     }
@@ -62,7 +66,7 @@ impl OriginWatcher {
             .watch(root, RecursiveMode::Recursive)
             .map_err(|e| WatchError::Watch(e.to_string()))?;
 
-        info!("Watching origin {} at {:?}", origin_id, root);
+        info!(origin_id = %origin_id, path = ?root, "Watcher started");
 
         let mut debouncer: HashMap<PathBuf, Instant> = HashMap::new();
 
@@ -72,7 +76,7 @@ impl OriginWatcher {
                     Self::handle_notify_event(origin_id, root, event_bus, event, &mut debouncer);
                 }
                 _ = stop_rx.recv() => {
-                    info!("Stopping watcher for {}", origin_id);
+                    info!(origin_id = %origin_id, "Watcher stopped");
                     break;
                 }
             }
@@ -104,7 +108,7 @@ impl OriginWatcher {
 
             if let Some(last_seen) = debouncer.get(&relative) {
                 if now.duration_since(*last_seen).as_millis() < DEBOUNCE_MS as u128 {
-                    debug!("Debouncing event for {:?}", relative);
+                    trace!(origin_id = %origin_id, path = ?relative, "Debouncing event");
                     continue;
                 }
             }
@@ -114,18 +118,18 @@ impl OriginWatcher {
 
             match event.kind {
                 EventKind::Create(_) => {
-                    debug!("File created: {:?}", relative);
+                    trace!(origin_id = %origin_id, path = ?relative, "File created");
                     event_bus.publish(Event::FileAdded {
                         path: vpath,
                         origin_id: origin_id.clone(),
                     });
                 }
                 EventKind::Remove(_) => {
-                    debug!("File removed: {:?}", relative);
+                    trace!(origin_id = %origin_id, path = ?relative, "File removed");
                     event_bus.publish(Event::FileRemoved { path: vpath, file_id: None });
                 }
                 EventKind::Modify(_) => {
-                    debug!("File modified: {:?}", relative);
+                    trace!(origin_id = %origin_id, path = ?relative, "File modified");
                     event_bus.publish(Event::FileModified { path: vpath });
                 }
                 _ => {}
@@ -156,6 +160,7 @@ impl WatchHandle {
 
 impl Drop for WatchHandle {
     fn drop(&mut self) {
+        trace!("WatchHandle dropped");
         let _ = self.stop_tx.try_send(());
     }
 }

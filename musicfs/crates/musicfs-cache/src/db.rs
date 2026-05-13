@@ -16,7 +16,7 @@ pub struct Database {
 
 impl Database {
     pub fn open(path: &Path) -> Result<Self> {
-        info!(?path, "Opening database");
+        debug!(?path, "Opening database");
 
         let conn =
             Connection::open(path).map_err(|e| Error::Database(format!("open failed: {}", e)))?;
@@ -24,9 +24,12 @@ impl Database {
         conn.execute_batch(SCHEMA)
             .map_err(|e| Error::Database(format!("schema init failed: {}", e)))?;
 
-        Ok(Self {
+        let db = Self {
             conn: Arc::new(Mutex::new(conn)),
-        })
+        };
+        let count = db.file_count().unwrap_or(0);
+        info!(path = ?path, file_count = count, "Database opened");
+        Ok(db)
     }
 
     pub fn open_memory() -> Result<Self> {

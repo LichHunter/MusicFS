@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 use tokio::runtime::Handle;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, trace, warn};
 
 const TTL: Duration = Duration::from_secs(1);
 const BLOCK_SIZE: u32 = 512;
@@ -159,12 +159,12 @@ impl Filesystem for MusicFs {
         info!("MusicFS destroyed");
     }
 
+    #[instrument(level = "debug", skip(self, reply))]
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        debug!("lookup(parent={}, name={:?})", parent, name);
-
         let name_str = name.to_string_lossy();
 
         if parent == ROOT_INODE && SearchOps::is_search_dir_name(&name_str) {
+            trace!(parent, name = %name_str, "search_dir_name matched");
             if let Some(ref search_ops) = self.search_ops {
                 search_ops.lookup_search_dir(reply);
                 return;
@@ -172,6 +172,7 @@ impl Filesystem for MusicFs {
         }
 
         if parent == SearchOps::search_dir_inode() {
+            trace!(parent, name = %name_str, "search_dir_inode matched");
             if let Some(ref search_ops) = self.search_ops {
                 let inode = self.get_or_create_query_inode(&name_str);
                 search_ops.lookup_query_dir(&name_str, inode, reply);
@@ -180,6 +181,7 @@ impl Filesystem for MusicFs {
         }
 
         if let Some(query) = self.get_query_for_inode(parent) {
+            trace!(parent, name = %name_str, query = %query, "query_inode matched");
             if let Some(ref search_ops) = self.search_ops {
                 let inode = self.get_or_create_query_inode(&format!("{}:{}", query, name_str));
                 search_ops.lookup_result(inode, reply);
@@ -190,6 +192,7 @@ impl Filesystem for MusicFs {
         let tree = self.tree.read().unwrap();
 
         if let Some(inode) = tree.lookup(parent, name) {
+            trace!(parent, name = %name_str, ino = inode, "file found in tree");
             if let Some(node) = tree.get(inode) {
                 let attr = self.node_to_attr(node);
                 reply.entry(&TTL, &attr, 0);
@@ -197,13 +200,14 @@ impl Filesystem for MusicFs {
             }
         }
 
+        trace!(parent, name = %name_str, "file not found");
         reply.error(libc::ENOENT);
     }
 
+    #[instrument(level = "debug", skip(self, reply))]
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
-        debug!("getattr(ino={})", ino);
-
         if ino == SearchOps::search_dir_inode() {
+            trace!(ino, "search_dir_inode matched");
             if let Some(ref search_ops) = self.search_ops {
                 search_ops.getattr_search_dir(reply);
                 return;
@@ -211,6 +215,7 @@ impl Filesystem for MusicFs {
         }
 
         if SearchOps::is_search_inode(ino) {
+            trace!(ino, "search_inode matched");
             if let Some(ref search_ops) = self.search_ops {
                 search_ops.getattr_result(ino, reply);
                 return;
@@ -218,6 +223,7 @@ impl Filesystem for MusicFs {
         }
 
         if self.get_query_for_inode(ino).is_some() {
+            trace!(ino, "query_inode matched");
             if let Some(ref search_ops) = self.search_ops {
                 search_ops.getattr_search_dir(reply);
                 return;
@@ -227,13 +233,16 @@ impl Filesystem for MusicFs {
         let tree = self.tree.read().unwrap();
 
         if let Some(node) = tree.get(ino) {
+            trace!(ino, "inode found in tree");
             let attr = self.node_to_attr(node);
             reply.attr(&TTL, &attr);
         } else {
+            trace!(ino, "inode not found");
             reply.error(libc::ENOENT);
         }
     }
 
+    #[instrument(level = "debug", skip(self, reply))]
     fn readdir(
         &mut self,
         _req: &Request,
@@ -242,9 +251,8 @@ impl Filesystem for MusicFs {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        debug!("readdir(ino={}, offset={})", ino, offset);
-
         if ino == SearchOps::search_dir_inode() {
+            trace!(ino, offset, "search_dir_inode matched");
             if let Some(ref search_ops) = self.search_ops {
                 search_ops.readdir_search_root(offset, reply);
                 return;
@@ -252,6 +260,7 @@ impl Filesystem for MusicFs {
         }
 
         if let Some(query) = self.get_query_for_inode(ino) {
+            trace!(ino, offset, query = %query, "query_inode matched");
             if let Some(ref search_ops) = self.search_ops {
                 search_ops.readdir_query(&query, offset, reply);
                 return;
@@ -261,6 +270,7 @@ impl Filesystem for MusicFs {
         let tree = self.tree.read().unwrap();
 
         if let Some(children) = tree.readdir(ino) {
+            trace!(ino, offset, children_count = children.len(), "directory found");
             let parent_ino = tree.get_parent(ino).unwrap_or(ROOT_INODE);
 
             let entries: Vec<(u64, FileType, &str)> = vec![
@@ -300,15 +310,16 @@ impl Filesystem for MusicFs {
 
             reply.ok();
         } else {
+            trace!(ino, offset, "directory not found");
             reply.error(libc::ENOENT);
         }
     }
 
+    #[instrument(level = "debug", skip(self, reply))]
     fn open(&mut self, _req: &Request, ino: u64, flags: i32, reply: ReplyOpen) {
-        debug!("open(ino={}, flags={})", ino, flags);
-
         let write_flags = libc::O_WRONLY | libc::O_RDWR | libc::O_APPEND | libc::O_TRUNC;
         if flags & write_flags != 0 {
+            trace!(ino, flags, "write flags detected");
             reply.error(libc::EROFS);
             return;
         }
@@ -316,12 +327,15 @@ impl Filesystem for MusicFs {
         let tree = self.tree.read().unwrap();
 
         if tree.get(ino).is_some() {
+            trace!(ino, "inode found");
             reply.opened(0, 0);
         } else {
+            trace!(ino, "inode not found");
             reply.error(libc::ENOENT);
         }
     }
 
+    #[instrument(level = "debug", skip(self, reply))]
     fn read(
         &mut self,
         _req: &Request,
@@ -333,19 +347,20 @@ impl Filesystem for MusicFs {
         _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
-        debug!("read(ino={}, offset={}, size={})", ino, offset, size);
-
         let file_id = {
             let tree = self.tree.read().unwrap();
             if let Some(VirtualNode::File(file)) = tree.get(ino) {
+                trace!(ino, "file found in tree");
                 file.file_id
             } else {
+                trace!(ino, "file not found");
                 reply.error(libc::ENOENT);
                 return;
             }
         };
 
         let Some(reader) = &self.reader else {
+            trace!(ino, "no reader available");
             reply.data(&[]);
             return;
         };
@@ -359,14 +374,18 @@ impl Filesystem for MusicFs {
         });
 
         match result {
-            Ok(data) => reply.data(&data),
+            Ok(data) => {
+                trace!(ino, offset, size_bytes = size, bytes_read = data.len(), "read successful");
+                reply.data(&data);
+            }
             Err(e) => {
-                warn!("Read error: {}", e);
+                warn!(ino, offset, size_bytes = size, error = %e, "read failed");
                 reply.error(libc::EIO);
             }
         }
     }
 
+    #[instrument(level = "debug", skip(self, reply))]
     fn release(
         &mut self,
         _req: &Request,
@@ -377,7 +396,7 @@ impl Filesystem for MusicFs {
         _flush: bool,
         reply: fuser::ReplyEmpty,
     ) {
-        debug!("release(ino={})", ino);
+        trace!(ino, "releasing file handle");
         reply.ok();
     }
 

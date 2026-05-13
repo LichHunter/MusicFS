@@ -3,7 +3,7 @@ use dashmap::DashMap;
 use musicfs_core::{Event, EventBus, OriginId};
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 pub struct Router {
     priorities: DashMap<OriginId, u8>,
@@ -77,7 +77,7 @@ impl Router {
     }
 
     pub fn select(&self, candidates: &[OriginId], health: &HealthSnapshot) -> Option<OriginId> {
-        candidates
+        let selected = candidates
             .iter()
             .filter(|id| health.is_healthy(id))
             .min_by_key(|id| {
@@ -85,7 +85,20 @@ impl Router {
                 let latency = self.latency_stats.get(*id).map(|s| s.p50_ms).unwrap_or(0);
                 (priority, latency)
             })
-            .cloned()
+            .cloned();
+        
+        if let Some(ref id) = selected {
+            let priority = self.get_priority(id);
+            let latency = self.latency_stats.get(id).map(|s| s.p50_ms).unwrap_or(0);
+            trace!(
+                origin_id = %id,
+                priority = priority,
+                latency_ms = latency,
+                "Selected healthy origin"
+            );
+        }
+        
+        selected
     }
 
     pub fn select_with_fallback(
@@ -104,6 +117,11 @@ impl Router {
             .min_by_key(|id| self.get_priority(id))
             .cloned()
         {
+            trace!(
+                origin_id = %id,
+                priority = self.get_priority(&id),
+                "Selected degraded origin as fallback"
+            );
             return Some(id);
         }
 
@@ -115,14 +133,26 @@ impl Router {
             });
         }
 
-        candidates
+        let selected = candidates
             .iter()
             .min_by_key(|id| {
                 let failures = health.failure_count(id).unwrap_or(u32::MAX);
                 let priority = self.get_priority(id);
                 (failures, priority)
             })
-            .cloned()
+            .cloned();
+        
+        if let Some(ref id) = selected {
+            let failures = health.failure_count(id).unwrap_or(u32::MAX);
+            trace!(
+                origin_id = %id,
+                failure_count = failures,
+                priority = self.get_priority(id),
+                "Selected least-bad unhealthy origin"
+            );
+        }
+        
+        selected
     }
 }
 

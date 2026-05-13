@@ -1,5 +1,6 @@
 use crate::types::{FileId, OriginId, VirtualPath};
 use tokio::sync::broadcast;
+use tracing::{debug, trace};
 
 pub struct EventBus {
     sender: broadcast::Sender<Event>,
@@ -12,7 +13,11 @@ impl EventBus {
     }
 
     pub fn publish(&self, event: Event) {
-        let _ = self.sender.send(event);
+        trace!(event = ?event, "Publishing event");
+        let receiver_count = self.sender.receiver_count();
+        if self.sender.send(event).is_err() && receiver_count > 0 {
+            debug!(receiver_count = receiver_count, "Event dropped, no active receivers");
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {

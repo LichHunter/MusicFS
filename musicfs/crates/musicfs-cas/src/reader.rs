@@ -6,6 +6,7 @@ use musicfs_core::FileId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use tracing::{debug, trace};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkManifest {
@@ -67,10 +68,12 @@ impl FileReader {
         {
             let manifests = self.manifests.read().unwrap();
             if let Some(m) = manifests.get(&file_id) {
+                trace!(file_id = ?file_id, "manifest cache hit");
                 return Ok(m.clone());
             }
         }
 
+        trace!(file_id = ?file_id, "manifest cache miss");
         let Some(fetcher) = &self.fetcher else {
             return Err(ReaderError::ManifestNotFound(file_id));
         };
@@ -103,6 +106,7 @@ impl FileReader {
 
         let end = std::cmp::min(offset + size as u64, manifest.total_size);
         let mut result = BytesMut::with_capacity((end - offset) as usize);
+        let mut chunks_read = 0u32;
 
         for chunk_ref in &manifest.chunks {
             let chunk_start = chunk_ref.offset;
@@ -127,8 +131,11 @@ impl FileReader {
             };
 
             result.extend_from_slice(&chunk_data[read_start..read_end]);
+            chunks_read += 1;
         }
 
+        let bytes_read = result.len() as u64;
+        debug!(file_id = ?file_id, offset, size, chunks_read, bytes_read, "read completed");
         Ok(result.freeze())
     }
 }

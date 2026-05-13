@@ -4,6 +4,7 @@ use std::ffi::{OsStr, OsString};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 use std::time::{Duration, SystemTime};
+use tracing::{debug, trace};
 
 pub type Inode = u64;
 pub const ROOT_INODE: Inode = 1;
@@ -123,8 +124,12 @@ impl VirtualTree {
 
     pub fn lookup(&self, parent_inode: Inode, name: &OsStr) -> Option<Inode> {
         if let Some(VirtualNode::Directory(dir)) = self.nodes.get(&parent_inode) {
-            dir.children.get(name).copied()
+            let result = dir.children.get(name).copied();
+            let hit = result.is_some();
+            trace!(inode = parent_inode, name = ?name, hit, "tree lookup");
+            result
         } else {
+            trace!(inode = parent_inode, name = ?name, hit = false, "tree lookup");
             None
         }
     }
@@ -194,6 +199,7 @@ impl VirtualTree {
             dir.children.insert(name, inode);
         }
 
+        debug!(inode, path = path.as_str(), file_id = ?meta.id, "add file to tree");
         inode
     }
 
@@ -263,6 +269,7 @@ impl VirtualTree {
                 }
             }
 
+            debug!(inode, path = path.as_str(), file_id = ?file.file_id, "remove file from tree");
             Some(file.file_id)
         } else {
             None

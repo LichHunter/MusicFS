@@ -3,7 +3,7 @@ use crate::traits::Origin;
 use musicfs_core::{Error, RealPath, Result};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, warn};
+use tracing::{trace, warn};
 
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
@@ -79,6 +79,7 @@ impl FailoverExecutor {
         let mut last_error = None;
 
         for origin in origins {
+            trace!(origin_id = %origin.id(), "Attempting read from origin");
             let start = std::time::Instant::now();
             match self.read_with_retry(&origin, &path.path, offset, size).await {
                 Ok(data) => {
@@ -87,7 +88,7 @@ impl FailoverExecutor {
                     return Ok(data);
                 }
                 Err(e) => {
-                    warn!("Origin {} failed: {}, trying next", origin.id(), e);
+                    warn!(origin_id = %origin.id(), error = %e, "Origin failed, trying next");
                     last_error = Some(e);
                 }
             }
@@ -108,13 +109,13 @@ impl FailoverExecutor {
                 Ok(data) => return Ok(data),
                 Err(e) if attempt + 1 < self.retry_config.max_attempts => {
                     let delay = self.retry_config.delay_for_attempt(attempt);
-                    debug!(
-                        "Retry {}/{} for {} after {:?}: {}",
-                        attempt + 1,
-                        self.retry_config.max_attempts,
-                        origin.id(),
-                        delay,
-                        e
+                    warn!(
+                        origin_id = %origin.id(),
+                        attempt = attempt + 1,
+                        max_attempts = self.retry_config.max_attempts,
+                        error = %e,
+                        delay_ms = delay.as_millis() as u64,
+                        "Retrying read operation"
                     );
                     tokio::time::sleep(delay).await;
                 }
@@ -142,6 +143,7 @@ impl FailoverExecutor {
         let mut last_error = None;
 
         for origin in origins {
+            trace!(origin_id = %origin.id(), "Attempting full read from origin");
             let start = std::time::Instant::now();
             match self.read_full_with_retry(&origin, &path.path).await {
                 Ok(data) => {
@@ -150,7 +152,7 @@ impl FailoverExecutor {
                     return Ok(data);
                 }
                 Err(e) => {
-                    warn!("Origin {} failed full read: {}, trying next", origin.id(), e);
+                    warn!(origin_id = %origin.id(), error = %e, "Origin failed full read, trying next");
                     last_error = Some(e);
                 }
             }
@@ -169,13 +171,13 @@ impl FailoverExecutor {
                 Ok(data) => return Ok(data),
                 Err(e) if attempt + 1 < self.retry_config.max_attempts => {
                     let delay = self.retry_config.delay_for_attempt(attempt);
-                    debug!(
-                        "Retry full read {}/{} for {} after {:?}: {}",
-                        attempt + 1,
-                        self.retry_config.max_attempts,
-                        origin.id(),
-                        delay,
-                        e
+                    warn!(
+                        origin_id = %origin.id(),
+                        attempt = attempt + 1,
+                        max_attempts = self.retry_config.max_attempts,
+                        error = %e,
+                        delay_ms = delay.as_millis() as u64,
+                        "Retrying full read operation"
                     );
                     tokio::time::sleep(delay).await;
                 }

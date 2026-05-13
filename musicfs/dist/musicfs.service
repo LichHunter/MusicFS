@@ -11,10 +11,17 @@ RestartSec=5
 User=musicfs
 Group=musicfs
 
+Environment="RUST_LOG=musicfs=info,warn"
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=musicfs
+RateLimitIntervalSec=30s
+RateLimitBurst=1000
+
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/var/cache/musicfs /mnt/music
+ReadWritePaths=/var/cache/musicfs /var/log/musicfs /mnt/music
 PrivateTmp=true
 
 [Install]

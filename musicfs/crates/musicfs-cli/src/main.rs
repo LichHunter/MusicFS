@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use musicfs_cache::TreeBuilder;
 use musicfs_cas::{CasConfig, CasStore, ContentFetcher, FileReader};
-use musicfs_core::{FileId, FileMeta, OriginId, RealPath, VirtualPath};
+use musicfs_core::{FileId, FileMeta, LoggingConfig, OriginId, RealPath, VirtualPath};
 use musicfs_fuse::MusicFs;
 use musicfs_metadata::MetadataParser;
 use musicfs_origins::{LocalOrigin, Origin};
@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 use tracing::{debug, info};
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::{fmt, prelude::*, EnvFilter, Layer};
 
 #[derive(Parser)]
 #[command(name = "musicfs")]
@@ -86,7 +88,6 @@ enum OriginCommands {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    init_logging(&cli.log_level);
 
     match cli.command {
         Commands::Mount {
@@ -94,13 +95,38 @@ fn main() -> Result<()> {
             mountpoint,
             origin,
             cache_dir,
-        } => run_mount(mountpoint, origin, cache_dir),
-        Commands::Status => run_status(),
-        Commands::Cache { command } => run_cache(command),
-        Commands::Search { query, limit } => run_search(&query, limit),
-        Commands::Origin { command } => run_origin(command),
-        Commands::Events { r#type } => run_events(r#type),
-        Commands::Shutdown { graceful, timeout } => run_shutdown(graceful, timeout),
+        } => {
+            let log_config = LoggingConfig {
+                level: cli.log_level,
+                ..Default::default()
+            };
+            let _guard = init_logging(&log_config)?;
+            run_mount(mountpoint, origin, cache_dir)
+        }
+        Commands::Status => {
+            init_basic_logging(&cli.log_level);
+            run_status()
+        }
+        Commands::Cache { command } => {
+            init_basic_logging(&cli.log_level);
+            run_cache(command)
+        }
+        Commands::Search { query, limit } => {
+            init_basic_logging(&cli.log_level);
+            run_search(&query, limit)
+        }
+        Commands::Origin { command } => {
+            init_basic_logging(&cli.log_level);
+            run_origin(command)
+        }
+        Commands::Events { r#type } => {
+            init_basic_logging(&cli.log_level);
+            run_events(r#type)
+        }
+        Commands::Shutdown { graceful, timeout } => {
+            init_basic_logging(&cli.log_level);
+            run_shutdown(graceful, timeout)
+        }
     }
 }
 
@@ -115,9 +141,7 @@ fn run_mount(
     let handle = runtime.handle().clone();
 
     let (tree, reader) = runtime.block_on(async {
-        info!("MusicFS starting...");
-        info!("Origin: {:?}", origin_path);
-        info!("Mountpoint: {:?}", mountpoint);
+        info!(origin = ?origin_path, mountpoint = ?mountpoint, "Mount configuration");
 
         let cache_dir = cache_dir.unwrap_or_else(|| {
             dirs::cache_dir()
@@ -240,13 +264,58 @@ fn run_shutdown(graceful: bool, timeout: u32) -> Result<()> {
     Ok(())
 }
 
-fn init_logging(level: &str) {
-    use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+fn init_logging(config: &LoggingConfig) -> Result<WorkerGuard> {
+    std::fs::create_dir_all(&config.log_dir)?;
 
+    let file_appender = tracing_appender::rolling::daily(&config.log_dir, "musicfs.log");
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+
+    let file_layer = if config.json_output {
+        fmt::layer()
+            .json()
+            .with_writer(non_blocking)
+            .with_ansi(false)
+            .boxed()
+    } else {
+        fmt::layer()
+            .with_writer(non_blocking)
+            .with_ansi(false)
+            .boxed()
+    };
+
+    let stderr_layer = fmt::layer().with_writer(std::io::stderr).compact();
+
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(&config.level));
+
+    let subscriber = tracing_subscriber::registry()
+        .with(filter)
+        .with(file_layer)
+        .with(stderr_layer);
+
+    #[cfg(target_os = "linux")]
+    let subscriber = {
+        let journald_layer = if config.journald {
+            tracing_journald::layer()
+                .ok()
+                .map(|l| l.with_syslog_identifier("musicfs".to_string()))
+        } else {
+            None
+        };
+        subscriber.with(journald_layer)
+    };
+
+    subscriber.init();
+
+    info!(version = env!("CARGO_PKG_VERSION"), "MusicFS starting");
+    Ok(guard)
+}
+
+fn init_basic_logging(level: &str) {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
 
     tracing_subscriber::registry()
-        .with(fmt::layer())
+        .with(fmt::layer().compact())
         .with(filter)
         .init();
 }

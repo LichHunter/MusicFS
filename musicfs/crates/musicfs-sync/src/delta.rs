@@ -4,7 +4,7 @@ use musicfs_origins::Origin;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::SystemTime;
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
 
 #[derive(Debug, Clone)]
 pub struct ScannedFile {
@@ -66,9 +66,13 @@ impl DeltaDetector {
         cached: &HashMap<FileId, FileMeta>,
         manifests: &HashMap<FileId, Vec<ManifestChunk>>,
     ) -> Result<ChangeSet, DeltaError> {
+        let origin_id = origin.id().clone();
+        info!(origin_id = %origin_id, "Starting delta detection");
+        
         let mut changes = ChangeSet::default();
 
         let origin_files = self.scan_origin(origin).await?;
+        trace!(origin_id = %origin_id, scanned_count = origin_files.len(), "Completed origin scan");
 
         let cached_by_path: HashMap<_, _> = cached
             .values()
@@ -78,7 +82,7 @@ impl DeltaDetector {
         for scanned in &origin_files {
             if let Some(cached_file) = cached_by_path.get(&scanned.path) {
                 if self.is_modified_scan(cached_file, scanned) {
-                    debug!("File modified: {:?}", scanned.path);
+                    debug!(origin_id = %origin_id, path = ?scanned.path, "File modified");
 
                     if let Some(old_chunks) = manifests.get(&cached_file.id) {
                         let new_chunks = self.compute_chunks_for_scan(origin, scanned).await?;
@@ -87,7 +91,7 @@ impl DeltaDetector {
                     }
                 }
             } else {
-                debug!("File added: {:?}", scanned.path);
+                debug!(origin_id = %origin_id, path = ?scanned.path, "File added");
                 changes.added.push(scanned.clone());
             }
         }
@@ -96,16 +100,17 @@ impl DeltaDetector {
 
         for cached_file in cached.values() {
             if !origin_paths.contains(&cached_file.real_path.path) {
-                debug!("File removed: {:?}", cached_file.real_path.path);
+                debug!(origin_id = %origin_id, path = ?cached_file.real_path.path, "File removed");
                 changes.removed.push(cached_file.id);
             }
         }
 
         info!(
-            "Delta detection complete: {} added, {} removed, {} modified",
-            changes.added.len(),
-            changes.removed.len(),
-            changes.modified.len()
+            origin_id = %origin_id,
+            files_added = changes.added.len(),
+            files_removed = changes.removed.len(),
+            files_modified = changes.modified.len(),
+            "Delta detection complete"
         );
 
         Ok(changes)

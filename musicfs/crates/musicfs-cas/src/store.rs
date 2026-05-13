@@ -4,7 +4,7 @@ use musicfs_core::ChunkHash;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::fs;
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 const DEFAULT_MAX_SIZE_10GB: u64 = 10 * 1024 * 1024 * 1024;
 const DEFAULT_SHARD_LEVELS_256_SUBDIRS: u8 = 2;
@@ -72,7 +72,7 @@ impl CasStore {
         let path = self.chunk_path(&hash);
 
         if path.exists() {
-            debug!("Chunk {} already exists (dedup)", hash);
+            trace!(hash = %hash, size_bytes = data.len(), "dedup hit");
             return Ok(hash);
         }
 
@@ -94,7 +94,7 @@ impl CasStore {
         self.current_size
             .fetch_add(data.len() as u64, Ordering::SeqCst);
 
-        debug!("Stored chunk {} ({} bytes)", hash, data.len());
+        debug!(hash = %hash, size_bytes = data.len(), "chunk stored");
         Ok(hash)
     }
 
@@ -111,6 +111,7 @@ impl CasStore {
             self.verify_integrity(hash, &data)?;
         }
 
+        debug!(hash = %hash, size_bytes = data.len(), "chunk retrieved");
         Ok(Bytes::from(data))
     }
 
@@ -156,7 +157,7 @@ impl CasStore {
             fs::remove_file(&path).await?;
             self.index.remove(hash.0.as_slice())?;
             self.current_size.fetch_sub(meta.len(), Ordering::SeqCst);
-            debug!("Deleted chunk {}", hash);
+            debug!(hash = %hash, size_bytes = meta.len(), "chunk deleted");
         }
 
         Ok(())

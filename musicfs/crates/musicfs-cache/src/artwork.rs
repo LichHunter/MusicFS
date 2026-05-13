@@ -5,7 +5,7 @@ use musicfs_metadata::artwork::{ArtSize, ArtType, Artwork};
 use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
-use tracing::debug;
+use tracing::{debug, info, trace, warn};
 
 const MAX_ARTWORK_INPUT_SIZE: usize = 10 * 1024 * 1024;
 
@@ -40,6 +40,7 @@ impl ArtworkCache {
             [],
         )?;
 
+        info!(path = ?db_path, "Artwork cache opened");
         Ok(Self {
             store,
             db_path: db_path.to_path_buf(),
@@ -47,7 +48,9 @@ impl ArtworkCache {
     }
 
     pub async fn store(&self, file_id: i64, artwork: &Artwork) -> Result<ChunkHash, ArtworkError> {
+        trace!(file_id = file_id, size_bytes = artwork.data.len(), "Storing artwork");
         if artwork.data.len() > MAX_ARTWORK_INPUT_SIZE {
+            warn!(file_id = file_id, size = artwork.data.len(), max = MAX_ARTWORK_INPUT_SIZE, "Artwork too large");
             return Err(ArtworkError::ImageTooLarge(artwork.data.len()));
         }
 
@@ -88,6 +91,7 @@ impl ArtworkCache {
         art_type: &str,
         size: ArtSize,
     ) -> Result<Option<Vec<u8>>, ArtworkError> {
+        trace!(file_id = file_id, art_type = %art_type, "Getting artwork");
         let db_path = self.db_path.clone();
         let art_type_clone = art_type.to_string();
 
@@ -107,6 +111,7 @@ impl ArtworkCache {
 
         match hash_hex {
             Some(hex) => {
+                trace!(file_id = file_id, "Artwork cache hit");
                 let hash = ChunkHash::from_hex(&hex).ok_or(ArtworkError::InvalidHash)?;
                 let data = self.store.get(&hash).await?;
 
@@ -118,7 +123,10 @@ impl ArtworkCache {
                     }
                 }
             }
-            None => Ok(None),
+            None => {
+                trace!(file_id = file_id, "Artwork cache miss");
+                Ok(None)
+            }
         }
     }
 

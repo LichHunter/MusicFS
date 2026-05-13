@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, info_span, Instrument};
 
 pub struct HealthMonitor {
     origins: DashMap<OriginId, Arc<dyn Origin>>,
@@ -150,22 +150,32 @@ impl HealthMonitor {
     pub fn start(self: Arc<Self>) -> HealthCheckHandle {
         let (stop_tx, mut stop_rx) = mpsc::channel::<()>(1);
         let monitor = self.clone();
+        let interval_secs = monitor.check_interval.as_secs();
 
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(monitor.check_interval);
+        info!(
+            interval_secs = interval_secs,
+            origin_count = monitor.origins.len(),
+            "Health monitor starting"
+        );
 
-            loop {
-                tokio::select! {
-                    _ = interval.tick() => {
-                        monitor.check_all().await;
-                    }
-                    _ = stop_rx.recv() => {
-                        info!("Health monitor stopping");
-                        break;
+        tokio::spawn(
+            async move {
+                let mut interval = tokio::time::interval(monitor.check_interval);
+
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {
+                            monitor.check_all().await;
+                        }
+                        _ = stop_rx.recv() => {
+                            info!("Health monitor stopping");
+                            break;
+                        }
                     }
                 }
             }
-        });
+            .instrument(info_span!("health_monitor")),
+        );
 
         HealthCheckHandle { stop_tx }
     }
@@ -199,14 +209,24 @@ impl HealthMonitor {
         match status {
             HealthStatus::Healthy => {
                 if state.status != HealthStatus::Healthy {
-                    info!("Origin {} is now healthy", id);
+                    info!(
+                        origin_id = %id,
+                        previous_status = ?state.status,
+                        duration_ms = latency_ms,
+                        "Origin health state transition to healthy"
+                    );
                 }
                 state.status = HealthStatus::Healthy;
                 state.consecutive_failures = 0;
             }
             HealthStatus::Degraded => {
                 if state.status != HealthStatus::Degraded {
-                    warn!("Origin {} is degraded", id);
+                    info!(
+                        origin_id = %id,
+                        previous_status = ?state.status,
+                        duration_ms = latency_ms,
+                        "Origin health state transition to degraded"
+                    );
                 }
                 state.status = HealthStatus::Degraded;
             }
@@ -214,16 +234,22 @@ impl HealthMonitor {
                 state.consecutive_failures += 1;
                 if state.consecutive_failures >= threshold {
                     if state.status != HealthStatus::Unhealthy {
-                        warn!(
-                            "Origin {} is now unhealthy ({} failures)",
-                            id, state.consecutive_failures
+                        info!(
+                            origin_id = %id,
+                            previous_status = ?state.status,
+                            consecutive_failures = state.consecutive_failures,
+                            threshold = threshold,
+                            duration_ms = latency_ms,
+                            "Origin health state transition to unhealthy"
                         );
                     }
                     state.status = HealthStatus::Unhealthy;
                 } else {
                     debug!(
-                        "Origin {} check failed ({}/{})",
-                        id, state.consecutive_failures, threshold
+                        origin_id = %id,
+                        consecutive_failures = state.consecutive_failures,
+                        threshold = threshold,
+                        "Origin health check failed"
                     );
                     state.status = HealthStatus::Degraded;
                 }

@@ -14,6 +14,9 @@ pub struct Config {
 
     #[serde(default)]
     pub health: HealthConfig,
+
+    #[serde(default)]
+    pub logging: LoggingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,6 +121,52 @@ fn default_timeout_ms() -> u64 {
 }
 fn default_unhealthy_threshold() -> u32 {
     3
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingConfig {
+    #[serde(default = "default_log_dir")]
+    pub log_dir: PathBuf,
+
+    #[serde(default)]
+    pub json_output: bool,
+
+    #[serde(default = "default_true")]
+    pub journald: bool,
+
+    #[serde(default = "default_log_level")]
+    pub level: String,
+
+    #[serde(default = "default_sample_rate")]
+    pub trace_sample_rate: f32,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            log_dir: default_log_dir(),
+            json_output: false,
+            journald: true,
+            level: default_log_level(),
+            trace_sample_rate: default_sample_rate(),
+        }
+    }
+}
+
+fn default_log_dir() -> PathBuf {
+    PathBuf::from("/var/log/musicfs")
+}
+
+fn default_log_level() -> String {
+    "musicfs=info,warn".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_sample_rate() -> f32 {
+    1.0
 }
 
 impl Config {

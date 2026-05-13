@@ -2,7 +2,7 @@ use musicfs_core::Event;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::sync::broadcast;
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WebhookPayload {
@@ -11,15 +11,28 @@ pub struct WebhookPayload {
     pub data: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct WebhookConfig {
     pub url: String,
+    #[serde(skip_serializing)]
     pub secret: Option<String>,
     pub events: Vec<String>,
     #[serde(default = "default_retry_count")]
     pub retry_count: u32,
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
+}
+
+impl std::fmt::Debug for WebhookConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebhookConfig")
+            .field("url", &self.url)
+            .field("secret", &self.secret.as_ref().map(|_| "[REDACTED]"))
+            .field("events", &self.events)
+            .field("retry_count", &self.retry_count)
+            .field("timeout_ms", &self.timeout_ms)
+            .finish()
+    }
 }
 
 fn default_retry_count() -> u32 {
@@ -30,26 +43,46 @@ fn default_timeout_ms() -> u64 {
     5000
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum WebhookError {
+    #[error("Failed to initialize HTTP client: {0}")]
+    ClientInit(String),
+}
+
 pub struct WebhookHandler {
     client: reqwest::Client,
     configs: Vec<WebhookConfig>,
 }
 
 impl WebhookHandler {
-    pub fn new(configs: Vec<WebhookConfig>) -> Self {
+    pub fn new(configs: Vec<WebhookConfig>) -> Result<Self, WebhookError> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
-            .expect("Failed to create HTTP client");
+            .map_err(|e| {
+                error!(error = %e, "Failed to create webhook HTTP client");
+                WebhookError::ClientInit(e.to_string())
+            })?;
 
-        Self { client, configs }
+        Ok(Self { client, configs })
     }
 
     pub async fn run(&self, mut rx: broadcast::Receiver<Event>) {
-        while let Ok(event) = rx.recv().await {
-            for config in &self.configs {
-                if self.matches_filter(&event, config) {
-                    self.dispatch(config, &event).await;
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    for config in &self.configs {
+                        if self.matches_filter(&event, config) {
+                            self.dispatch(config, &event).await;
+                        }
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(skipped = n, "Webhook handler lagged, skipped events");
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    debug!("Event channel closed, webhook handler stopping");
+                    break;
                 }
             }
         }
@@ -129,8 +162,14 @@ impl WebhookHandler {
                 type HmacSha256 = Hmac<Sha256>;
 
                 let body = serde_json::to_string(payload).unwrap_or_default();
-                let mut mac =
-                    HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC key invalid");
+                let mac = match HmacSha256::new_from_slice(secret.as_bytes()) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        error!(error = %e, "Invalid HMAC key for webhook signature");
+                        return String::new();
+                    }
+                };
+                let mut mac = mac;
                 mac.update(body.as_bytes());
                 let result = mac.finalize();
 

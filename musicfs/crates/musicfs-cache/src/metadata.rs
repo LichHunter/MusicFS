@@ -3,6 +3,7 @@ use musicfs_core::{AudioMeta, FileMeta, OriginId, Result, VirtualPath};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing::trace;
 
 pub struct MetadataCache {
     db: Arc<Database>,
@@ -34,7 +35,10 @@ impl MetadataCache {
     }
 
     pub fn lookup(&self, path: &VirtualPath) -> Result<Option<FileMeta>> {
-        self.db.get_file_by_virtual_path(path)
+        let result = self.db.get_file_by_virtual_path(path)?;
+        let hit = result.is_some();
+        trace!(path = path.as_str(), hit, "metadata cache lookup");
+        Ok(result)
     }
 
     pub fn is_fresh(
@@ -52,8 +56,11 @@ impl MetadataCache {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or(Duration::ZERO)
                 .as_secs();
-            Ok(current_secs == cached_secs)
+            let hit = current_secs == cached_secs;
+            trace!(path = ?real_path, hit, "metadata freshness check");
+            Ok(hit)
         } else {
+            trace!(path = ?real_path, hit = false, "metadata freshness check");
             Ok(false)
         }
     }

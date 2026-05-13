@@ -3,6 +3,7 @@ use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::{debug, info, trace};
 
 #[derive(Debug, Clone)]
 pub struct AccessPattern {
@@ -79,15 +80,19 @@ impl PatternStore {
             map
         };
 
-        Ok(Self {
+        let store = Self {
             db: Mutex::new(db),
             sequence_counts: RwLock::new(sequence_counts),
             time_patterns: RwLock::new(HashMap::new()),
             max_history,
-        })
+        };
+        let sequence_count = store.sequence_counts.read().len();
+        info!(path = ?db_path, sequence_count = sequence_count, max_history = max_history, "Pattern store opened");
+        Ok(store)
     }
 
     pub fn record(&self, file_id: FileId, _context: AccessContext) -> Result<(), PatternError> {
+        trace!(file_id = file_id.0, "Recording access pattern");
         let now = SystemTime::now();
         let timestamp = now.duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
         let hour = (timestamp / 3600 % 24) as u8;
@@ -144,11 +149,13 @@ impl PatternStore {
             .collect();
 
         predictions.sort_by(|a, b| b.1.cmp(&a.1));
-        predictions
+        let result: Vec<FileId> = predictions
             .into_iter()
             .take(limit)
             .map(|(id, _)| id)
-            .collect()
+            .collect();
+        debug!(file_id = current.0, predictions = result.len(), "Predicted next files");
+        result
     }
 
     pub fn predict_for_time(&self, hour: u8, limit: usize) -> Vec<FileId> {

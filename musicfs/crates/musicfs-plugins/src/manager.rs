@@ -275,6 +275,7 @@ impl Default for PluginManager {
 
 impl Drop for PluginManager {
     fn drop(&mut self) {
+        debug!(plugin_count = self.list().len(), "PluginManager dropping");
         let _ = self.shutdown();
     }
 }
