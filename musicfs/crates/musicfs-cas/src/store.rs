@@ -6,6 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::fs;
 use tracing::{debug, trace, warn};
 
+#[cfg(feature = "failpoints")]
+use fail::fail_point;
+
 const DEFAULT_MAX_SIZE_10GB: u64 = 10 * 1024 * 1024 * 1024;
 const DEFAULT_SHARD_LEVELS_256_SUBDIRS: u8 = 2;
 
@@ -80,7 +83,23 @@ impl CasStore {
             fs::create_dir_all(parent).await?;
         }
 
+        #[cfg(feature = "failpoints")]
+        fail_point!("cas-put-before-write", |_| {
+            Err(CasError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Failpoint: cas-put-before-write",
+            )))
+        });
+
         fs::write(&path, data).await?;
+
+        #[cfg(feature = "failpoints")]
+        fail_point!("cas-put-after-write-before-index", |_| {
+            Err(CasError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Failpoint: cas-put-after-write-before-index",
+            )))
+        });
 
         let location = ChunkLocation {
             path: path.clone(),

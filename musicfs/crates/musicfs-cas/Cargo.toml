@@ -3,7 +3,12 @@ name = "musicfs-cas"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+failpoints = ["fail/failpoints"]
+
 [dependencies]
+fail = { workspace = true, optional = true }
 musicfs-core = { path = "../musicfs-core" }
 musicfs-origins = { path = "../musicfs-origins" }
 musicfs-sync = { path = "../musicfs-sync" }

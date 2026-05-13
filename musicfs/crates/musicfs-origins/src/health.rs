@@ -180,7 +180,7 @@ impl HealthMonitor {
         HealthCheckHandle { stop_tx }
     }
 
-    async fn check_all(&self) {
+    pub async fn check_all(&self) {
         let origins: Vec<_> = self
             .origins
             .iter()
