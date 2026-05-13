@@ -22,6 +22,8 @@ tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 anyhow.workspace = true
 dirs.workspace = true
+parking_lot.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tracing-journald.workspace = true
+sd-notify.workspace = true

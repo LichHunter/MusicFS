@@ -6,10 +6,11 @@ use fuser::{
 use musicfs_cache::{VirtualNode, VirtualTree, ROOT_INODE};
 use musicfs_cas::FileReader;
 use musicfs_core::Result;
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::runtime::Handle;
 use tracing::{debug, info, instrument, trace, warn};
@@ -65,15 +66,15 @@ impl MusicFs {
     }
 
     fn get_or_create_query_inode(&self, query: &str) -> u64 {
-        let query_inodes = self.query_inodes.read().unwrap();
+        let query_inodes = self.query_inodes.read();
         if let Some(&inode) = query_inodes.get(query) {
             return inode;
         }
         drop(query_inodes);
 
-        let mut query_inodes = self.query_inodes.write().unwrap();
-        let mut inode_queries = self.inode_queries.write().unwrap();
-        let mut next_inode = self.next_query_inode.write().unwrap();
+        let mut query_inodes = self.query_inodes.write();
+        let mut inode_queries = self.inode_queries.write();
+        let mut next_inode = self.next_query_inode.write();
 
         if let Some(&inode) = query_inodes.get(query) {
             return inode;
@@ -87,7 +88,7 @@ impl MusicFs {
     }
 
     fn get_query_for_inode(&self, inode: u64) -> Option<String> {
-        self.inode_queries.read().unwrap().get(&inode).cloned()
+        self.inode_queries.read().get(&inode).cloned()
     }
 
     pub fn mount(self, mountpoint: &Path) -> Result<()> {
@@ -103,6 +104,22 @@ impl MusicFs {
         fuser::mount2(self, mountpoint, &options).map_err(musicfs_core::Error::Io)?;
 
         Ok(())
+    }
+
+    pub fn spawn_mount(self, mountpoint: &Path) -> Result<fuser::BackgroundSession> {
+        info!("Mounting MusicFS at {:?}", mountpoint);
+
+        let options = vec![
+            fuser::MountOption::RO,
+            fuser::MountOption::FSName("musicfs".to_string()),
+            fuser::MountOption::AutoUnmount,
+            fuser::MountOption::AllowOther,
+        ];
+
+        let session =
+            fuser::spawn_mount2(self, mountpoint, &options).map_err(musicfs_core::Error::Io)?;
+
+        Ok(session)
     }
 
     fn node_to_attr(&self, node: &VirtualNode) -> FileAttr {
@@ -189,7 +206,7 @@ impl Filesystem for MusicFs {
             }
         }
 
-        let tree = self.tree.read().unwrap();
+        let tree = self.tree.read();
 
         if let Some(inode) = tree.lookup(parent, name) {
             trace!(parent, name = %name_str, ino = inode, "file found in tree");
@@ -230,7 +247,7 @@ impl Filesystem for MusicFs {
             }
         }
 
-        let tree = self.tree.read().unwrap();
+        let tree = self.tree.read();
 
         if let Some(node) = tree.get(ino) {
             trace!(ino, "inode found in tree");
@@ -267,7 +284,7 @@ impl Filesystem for MusicFs {
             }
         }
 
-        let tree = self.tree.read().unwrap();
+        let tree = self.tree.read();
 
         if let Some(children) = tree.readdir(ino) {
             trace!(ino, offset, children_count = children.len(), "directory found");
@@ -324,7 +341,7 @@ impl Filesystem for MusicFs {
             return;
         }
 
-        let tree = self.tree.read().unwrap();
+        let tree = self.tree.read();
 
         if tree.get(ino).is_some() {
             trace!(ino, "inode found");
@@ -348,7 +365,7 @@ impl Filesystem for MusicFs {
         reply: ReplyData,
     ) {
         let file_id = {
-            let tree = self.tree.read().unwrap();
+            let tree = self.tree.read();
             if let Some(VirtualNode::File(file)) = tree.get(ino) {
                 trace!(ino, "file found in tree");
                 file.file_id
@@ -564,7 +581,7 @@ mod tests {
 
         let _fs = MusicFs::new(tree.clone(), handle);
 
-        let tree_read = tree.read().unwrap();
+        let tree_read = tree.read();
         assert!(tree_read.get(ROOT_INODE).is_some());
         assert!(tree_read.get_by_path(&VirtualPath::new("/Artist")).is_some());
     }

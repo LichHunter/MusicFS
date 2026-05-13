@@ -6,6 +6,7 @@ After=network.target
 Type=notify
 ExecStart=/usr/bin/musicfs mount --config /etc/musicfs/config.toml /mnt/music
 ExecStop=/usr/bin/musicfs shutdown
+ExecStopPost=/usr/bin/fusermount -uz /mnt/music || true
 Restart=on-failure
 RestartSec=5
 User=musicfs

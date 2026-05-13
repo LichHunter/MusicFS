@@ -1,6 +1,6 @@
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
 use std::time::Instant;
 
 #[derive(Default)]
@@ -45,7 +45,7 @@ impl Metrics {
             self.fuse_ops.open.load(Ordering::Relaxed),
         ));
 
-        for (op, histogram) in self.fuse_latency.histograms.read().unwrap().iter() {
+        for (op, histogram) in self.fuse_latency.histograms.read().iter() {
             let quantiles = histogram.quantiles();
             output.push_str(&format!(
                 "# HELP musicfs_fuse_latency_seconds FUSE operation latency\n\
@@ -95,7 +95,7 @@ impl Metrics {
             "# HELP musicfs_origin_health Origin health status (1=healthy, 0=unhealthy)\n\
              # TYPE musicfs_origin_health gauge\n",
         );
-        for (origin_id, healthy) in self.origin_health.status.read().unwrap().iter() {
+        for (origin_id, healthy) in self.origin_health.status.read().iter() {
             output.push_str(&format!(
                 "musicfs_origin_health{{origin=\"{}\"}} {}\n",
                 origin_id,
@@ -203,7 +203,7 @@ pub struct FuseLatencyMetrics {
 
 impl FuseLatencyMetrics {
     pub fn record(&self, op: &str, latency_secs: f64) {
-        let mut histograms = self.histograms.write().unwrap();
+        let mut histograms = self.histograms.write();
         histograms
             .entry(op.to_string())
             .or_default()
@@ -268,7 +268,6 @@ impl OriginHealthMetrics {
     pub fn set_health(&self, origin_id: &str, healthy: bool) {
         self.status
             .write()
-            .unwrap()
             .insert(origin_id.to_string(), healthy);
     }
 }

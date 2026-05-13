@@ -2,8 +2,9 @@ use crate::health::{HealthMonitor, HealthSnapshot};
 use crate::router::Router;
 use crate::traits::{Origin, WatchHandle};
 use musicfs_core::{OriginId, RealPath};
+use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tracing::{info, warn};
 
 pub struct OriginRegistry {
@@ -29,17 +30,17 @@ impl OriginRegistry {
 
         self.router.set_priority(id.clone(), priority);
         self.health_monitor.add_origin(origin.clone());
-        self.origins.write().unwrap().insert(id, origin);
+        self.origins.write().insert(id, origin);
     }
 
     pub fn unregister(&self, id: &OriginId) {
         info!("Unregistering origin {}", id);
 
-        if let Some(handles) = self.watch_handles.write().unwrap().remove(id) {
+        if let Some(handles) = self.watch_handles.write().remove(id) {
             info!("Dropping {} watch handles for origin {}", handles.len(), id);
         }
 
-        self.origins.write().unwrap().remove(id);
+        self.origins.write().remove(id);
         self.router.remove_priority(id);
         self.health_monitor.remove_origin(id);
     }
@@ -47,22 +48,21 @@ impl OriginRegistry {
     pub fn register_watch(&self, origin_id: &OriginId, handle: WatchHandle) {
         self.watch_handles
             .write()
-            .unwrap()
             .entry(origin_id.clone())
             .or_default()
             .push(handle);
     }
 
     pub fn get(&self, id: &OriginId) -> Option<Arc<dyn Origin>> {
-        self.origins.read().unwrap().get(id).cloned()
+        self.origins.read().get(id).cloned()
     }
 
     pub fn list(&self) -> Vec<Arc<dyn Origin>> {
-        self.origins.read().unwrap().values().cloned().collect()
+        self.origins.read().values().cloned().collect()
     }
 
     pub fn route(&self, path: &RealPath) -> Option<Arc<dyn Origin>> {
-        let origins = self.origins.read().unwrap();
+        let origins = self.origins.read();
         let health = self.health_monitor.snapshot();
 
         let candidates: Vec<_> = origins
@@ -86,7 +86,7 @@ impl OriginRegistry {
     }
 
     pub fn route_with_fallback(&self, path: &RealPath) -> Option<Arc<dyn Origin>> {
-        let origins = self.origins.read().unwrap();
+        let origins = self.origins.read();
         let health = self.health_monitor.snapshot();
 
         let candidates: Vec<_> = origins
@@ -109,7 +109,7 @@ impl OriginRegistry {
     }
 
     pub fn route_all(&self, path: &RealPath) -> Vec<Arc<dyn Origin>> {
-        let origins = self.origins.read().unwrap();
+        let origins = self.origins.read();
         let health = self.health_monitor.snapshot();
 
         let mut result: Vec<_> = origins

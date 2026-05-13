@@ -3,9 +3,10 @@ use crate::fetcher::{ContentFetcher, FetchError};
 use crate::store::CasStore;
 use bytes::{Bytes, BytesMut};
 use musicfs_core::FileId;
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tracing::{debug, trace};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,13 +61,13 @@ impl FileReader {
     }
 
     pub fn register_manifest(&self, manifest: ChunkManifest) {
-        let mut manifests = self.manifests.write().unwrap();
+        let mut manifests = self.manifests.write();
         manifests.insert(manifest.file_id, manifest);
     }
 
     async fn get_or_fetch_manifest(&self, file_id: FileId) -> Result<ChunkManifest, ReaderError> {
         {
-            let manifests = self.manifests.read().unwrap();
+            let manifests = self.manifests.read();
             if let Some(m) = manifests.get(&file_id) {
                 trace!(file_id = ?file_id, "manifest cache hit");
                 return Ok(m.clone());
@@ -81,7 +82,6 @@ impl FileReader {
         let manifest = fetcher.ensure_cached(file_id).await?;
         self.manifests
             .write()
-            .unwrap()
             .insert(file_id, manifest.clone());
         Ok(manifest)
     }

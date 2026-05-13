@@ -6,10 +6,11 @@ use musicfs_core::{FileId, FileMeta, LoggingConfig, OriginId, RealPath, VirtualP
 use musicfs_fuse::MusicFs;
 use musicfs_metadata::MetadataParser;
 use musicfs_origins::{LocalOrigin, Origin};
+use parking_lot::RwLock;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::SystemTime;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter, Layer};
 
@@ -87,6 +88,7 @@ enum OriginCommands {
 }
 
 fn main() -> Result<()> {
+    musicfs_core::install_panic_hook();
     let cli = Cli::parse();
 
     match cli.command {
@@ -188,13 +190,49 @@ fn run_mount(
         Ok::<_, anyhow::Error>((tree, reader))
     })?;
 
-    let fs = MusicFs::with_reader(tree, reader, handle);
+    check_stale_mount(&mountpoint)?;
+
+    let fs = MusicFs::with_reader(tree, reader, handle.clone());
 
     info!("Mounting filesystem at {:?}", mountpoint);
-    info!("Press Ctrl+C to unmount");
 
-    fs.mount(&mountpoint)
+    let session = fs
+        .spawn_mount(&mountpoint)
         .context("Failed to mount filesystem")?;
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Err(e) = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]) {
+            debug!("sd_notify not available (not running under systemd): {}", e);
+        }
+    }
+    info!("MusicFS ready, PID {}", std::process::id());
+
+    runtime.block_on(async {
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let mut sigint =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+
+        tokio::select! {
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM, shutting down");
+            }
+            _ = sigint.recv() => {
+                info!("Received SIGINT, shutting down");
+            }
+        }
+
+        Ok::<_, anyhow::Error>(())
+    })?;
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Stopping]);
+    }
+    info!("Unmounting filesystem");
+    drop(session);
+    info!("Shutdown complete");
 
     Ok(())
 }
@@ -436,4 +474,26 @@ fn sanitize(s: &str) -> String {
             _ => c,
         })
         .collect()
+}
+
+fn check_stale_mount(mountpoint: &Path) -> Result<()> {
+    if let Ok(mounts) = std::fs::read_to_string("/proc/mounts") {
+        for line in mounts.lines() {
+            if line.contains(mountpoint.to_string_lossy().as_ref()) && line.contains("fuse") {
+                warn!(
+                    "Stale FUSE mount detected at {:?}, attempting cleanup",
+                    mountpoint
+                );
+                let status = std::process::Command::new("fusermount")
+                    .args(["-uz", &mountpoint.to_string_lossy()])
+                    .status();
+                match status {
+                    Ok(s) if s.success() => info!("Stale mount cleaned up"),
+                    Ok(s) => warn!("fusermount exited with: {}", s),
+                    Err(e) => warn!("Failed to run fusermount: {}", e),
+                }
+            }
+        }
+    }
+    Ok(())
 }

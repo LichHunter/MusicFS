@@ -37,3 +37,5 @@ full = ["failpoints", "process-tests", "resource-limits", "docker-tests"]
 
 [dev-dependencies]
 tokio-test = "0.4"
+sd-notify.workspace = true
+libc.workspace = true

@@ -2,8 +2,9 @@ use crate::{CasStore, ChunkManifest, ChunkRef};
 use musicfs_core::{Event, EventBus, FileId, FileMeta, OriginId};
 use musicfs_origins::Origin;
 use musicfs_sync::CdcChunker;
+use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tracing::{debug, info};
 
 pub struct ContentFetcher {
@@ -37,15 +38,15 @@ impl ContentFetcher {
 
     pub fn register_origin(&self, origin: Arc<dyn Origin>) {
         let id = origin.id().clone();
-        self.origins.write().unwrap().insert(id, origin);
+        self.origins.write().insert(id, origin);
     }
 
     pub fn register_file(&self, meta: FileMeta) {
-        self.file_meta.write().unwrap().insert(meta.id, meta);
+        self.file_meta.write().insert(meta.id, meta);
     }
 
     pub fn register_files(&self, files: impl IntoIterator<Item = FileMeta>) {
-        let mut map = self.file_meta.write().unwrap();
+        let mut map = self.file_meta.write();
         for meta in files {
             map.insert(meta.id, meta);
         }
@@ -53,7 +54,7 @@ impl ContentFetcher {
 
     pub async fn fetch_file(&self, file_id: FileId) -> Result<ChunkManifest, FetchError> {
         let meta = {
-            let files = self.file_meta.read().unwrap();
+            let files = self.file_meta.read();
             files
                 .get(&file_id)
                 .cloned()
@@ -61,7 +62,7 @@ impl ContentFetcher {
         };
 
         let origin = {
-            let origins = self.origins.read().unwrap();
+            let origins = self.origins.read();
             origins
                 .get(&meta.real_path.origin_id)
                 .cloned()
@@ -123,7 +124,7 @@ impl ContentFetcher {
     }
 
     pub fn get_file_meta(&self, file_id: FileId) -> Option<FileMeta> {
-        self.file_meta.read().unwrap().get(&file_id).cloned()
+        self.file_meta.read().get(&file_id).cloned()
     }
 
     pub fn emit_access_event(&self, meta: &FileMeta, offset: u64, size: u32) {

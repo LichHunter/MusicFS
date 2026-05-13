@@ -1,8 +1,8 @@
 use musicfs_core::{FileId, FileMeta, VirtualPath};
+use parking_lot::RwLock;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{OsStr, OsString};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
 use std::time::{Duration, SystemTime};
 use tracing::{debug, trace};
 
@@ -291,7 +291,7 @@ impl VirtualTree {
     }
 
     pub fn needs_refresh(&self) -> bool {
-        let last = *self.last_refresh.read().unwrap();
+        let last = *self.last_refresh.read();
         last.elapsed().unwrap_or(Duration::MAX) > self.refresh_policy.ttl
     }
 
@@ -303,11 +303,11 @@ impl VirtualTree {
             root.children.clear();
         }
 
-        *self.last_refresh.write().unwrap() = SystemTime::now();
+        *self.last_refresh.write() = SystemTime::now();
     }
 
     pub fn mark_refreshed(&self) {
-        *self.last_refresh.write().unwrap() = SystemTime::now();
+        *self.last_refresh.write() = SystemTime::now();
     }
 
     pub fn refresh_policy(&self) -> &RefreshPolicy {

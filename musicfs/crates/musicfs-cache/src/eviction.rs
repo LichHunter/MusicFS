@@ -1,7 +1,7 @@
 use musicfs_cas::CasStore;
 use musicfs_core::ChunkHash;
+use parking_lot::RwLock;
 use std::collections::BTreeMap;
-use std::sync::RwLock;
 use std::time::Instant;
 use tracing::info;
 
@@ -64,8 +64,8 @@ impl Default for LruEviction {
 impl EvictionPolicy for LruEviction {
     fn record_access(&self, hash: ChunkHash) {
         let now = Instant::now();
-        let mut times = self.access_times.write().unwrap();
-        let mut h2t = self.hash_to_time.write().unwrap();
+        let mut times = self.access_times.write();
+        let mut h2t = self.hash_to_time.write();
 
         if let Some(old_time) = h2t.remove(&hash) {
             times.remove(&old_time);
@@ -76,13 +76,13 @@ impl EvictionPolicy for LruEviction {
     }
 
     fn select_victims(&self, count: usize) -> Vec<ChunkHash> {
-        let times = self.access_times.read().unwrap();
+        let times = self.access_times.read();
         times.values().take(count).copied().collect()
     }
 
     fn remove(&self, hash: &ChunkHash) {
-        let mut times = self.access_times.write().unwrap();
-        let mut h2t = self.hash_to_time.write().unwrap();
+        let mut times = self.access_times.write();
+        let mut h2t = self.hash_to_time.write();
 
         if let Some(time) = h2t.remove(hash) {
             times.remove(&time);

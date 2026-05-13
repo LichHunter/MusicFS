@@ -1911,6 +1911,7 @@ dependencies = [
  "musicfs-core",
  "musicfs-origins",
  "musicfs-sync",
+ "parking_lot 0.12.5",
  "rmp-serde",
  "serde",
  "sled",
@@ -1934,6 +1935,8 @@ dependencies = [
  "musicfs-fuse",
  "musicfs-metadata",
  "musicfs-origins",
+ "parking_lot 0.12.5",
+ "sd-notify",
  "tokio",
  "tracing",
  "tracing-appender",
@@ -1946,6 +1949,7 @@ name = "musicfs-core"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "parking_lot 0.12.5",
  "serde",
  "serde_json",
  "tempfile",
@@ -2015,6 +2019,7 @@ dependencies = [
  "dashmap",
  "libc",
  "musicfs-core",
+ "parking_lot 0.12.5",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -2080,6 +2085,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "fail",
+ "libc",
  "musicfs-cache",
  "musicfs-cas",
  "musicfs-core",
@@ -2089,6 +2095,7 @@ dependencies = [
  "parking_lot 0.12.5",
  "reqwest",
  "rlimit",
+ "sd-notify",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -2937,6 +2944,15 @@ checksum = "da046153aa2352493d6cb7da4b6e5c0c057d8a1d0a9aa8560baffdd945acd414"
 dependencies = [
  "ring",
  "untrusted",
+]
+
+[[package]]
+name = "sd-notify"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b943eadf71d8b69e661330cb0e2656e31040acf21ee7708e2c238a0ec6af2bf4"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

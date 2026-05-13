@@ -87,5 +87,7 @@ tokio-stream = "0.1"
 image = { version = "0.24", default-features = false, features = ["jpeg", "png"] }
 chrono = "0.4"
 
+sd-notify = "0.4"
+
 [workspace.dependencies.tonic-build]
 version = "0.11"
