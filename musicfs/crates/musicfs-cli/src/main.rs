@@ -7,6 +7,9 @@ use musicfs_fuse::MusicFs;
 use musicfs_metadata::MetadataParser;
 use musicfs_origins::{LocalOrigin, Origin};
 use parking_lot::RwLock;
+use std::fs::File;
+use std::io::Write;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -87,6 +90,29 @@ enum OriginCommands {
     },
 }
 
+struct LockFile {
+    _file: File,
+}
+
+fn try_acquire_lock(path: &Path) -> Result<LockFile> {
+    let file = File::create(path).context("Failed to create lock file")?;
+    let fd = file.as_raw_fd();
+
+    let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+    if ret != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::WouldBlock {
+            anyhow::bail!("MusicFS is already running (lock file: {:?})", path);
+        }
+        return Err(err).context("Failed to acquire lock");
+    }
+
+    let mut f = &file;
+    writeln!(f, "{}", std::process::id())?;
+
+    Ok(LockFile { _file: file })
+}
+
 fn main() -> Result<()> {
     musicfs_core::install_panic_hook();
     let cli = Cli::parse();
@@ -139,24 +165,25 @@ fn run_mount(
 ) -> Result<()> {
     let origin_path = origin_path.context("--origin is required for mount")?;
 
+    let cache_dir = cache_dir.unwrap_or_else(|| {
+        dirs::cache_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join("musicfs")
+    });
+
     let runtime = tokio::runtime::Runtime::new().context("Failed to create Tokio runtime")?;
     let handle = runtime.handle().clone();
 
+    let cache_dir_clone = cache_dir.clone();
     let (tree, reader) = runtime.block_on(async {
         info!(origin = ?origin_path, mountpoint = ?mountpoint, "Mount configuration");
+        info!("Cache directory: {:?}", cache_dir_clone);
 
-        let cache_dir = cache_dir.unwrap_or_else(|| {
-            dirs::cache_dir()
-                .unwrap_or_else(|| PathBuf::from("/tmp"))
-                .join("musicfs")
-        });
-        info!("Cache directory: {:?}", cache_dir);
-
-        std::fs::create_dir_all(&cache_dir).context("Failed to create cache directory")?;
+        std::fs::create_dir_all(&cache_dir_clone).context("Failed to create cache directory")?;
         std::fs::create_dir_all(&mountpoint).context("Failed to create mountpoint")?;
 
         let cas_config = CasConfig {
-            chunks_dir: cache_dir.join("chunks"),
+            chunks_dir: cache_dir_clone.join("chunks"),
             ..Default::default()
         };
         let store = Arc::new(
@@ -191,6 +218,11 @@ fn run_mount(
     })?;
 
     check_stale_mount(&mountpoint)?;
+
+    let lock_path = cache_dir.join("musicfs.lock");
+    let _lock = try_acquire_lock(&lock_path)
+        .context("Failed to acquire lock — is another instance running?")?;
+    info!(lock_path = ?lock_path, "Lock acquired");
 
     let fs = MusicFs::with_reader(tree, reader, handle.clone());
 

@@ -5,7 +5,7 @@ use musicfs_sync::CdcChunker;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 pub struct ContentFetcher {
     store: Arc<CasStore>,
@@ -92,7 +92,9 @@ impl ContentFetcher {
         let mut chunk_refs = Vec::with_capacity(chunks.len());
         for chunk in chunks {
             if !self.store.exists(&chunk.hash) {
-                self.store.put(chunk.data).await.map_err(FetchError::Store)?;
+                if let Err(e) = self.store.put(chunk.data).await {
+                    warn!(hash = %chunk.hash, error = %e, "CAS write failed, continuing in passthrough mode");
+                }
             }
 
             chunk_refs.push(ChunkRef {

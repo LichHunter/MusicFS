@@ -77,17 +77,29 @@ impl CasStore {
     }
 
     async fn calculate_size(dir: &Path) -> u64 {
-        let mut size = 0u64;
-        if let Ok(mut entries) = fs::read_dir(dir).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                if let Ok(meta) = entry.metadata().await {
-                    if meta.is_file() {
-                        size += meta.len();
+        Self::calculate_size_recursive(dir).await
+    }
+
+    fn calculate_size_recursive(dir: &Path) -> std::pin::Pin<Box<dyn std::future::Future<Output = u64> + Send + '_>> {
+        Box::pin(async move {
+            let mut size = 0u64;
+            if let Ok(mut entries) = fs::read_dir(dir).await {
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    if let Ok(meta) = entry.metadata().await {
+                        if meta.is_file() {
+                            size += meta.len();
+                        } else if meta.is_dir() {
+                            // Skip sled index directory
+                            let name = entry.file_name();
+                            if name != "index.sled" {
+                                size += Self::calculate_size_recursive(&entry.path()).await;
+                            }
+                        }
                     }
                 }
             }
-        }
-        size
+            size
+        })
     }
 
     pub async fn put(&self, data: &[u8]) -> Result<ChunkHash, CasError> {

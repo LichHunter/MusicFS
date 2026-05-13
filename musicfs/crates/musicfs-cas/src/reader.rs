@@ -1,13 +1,13 @@
 use crate::chunks::ChunkRef;
 use crate::fetcher::{ContentFetcher, FetchError};
-use crate::store::CasStore;
+use crate::store::{CasError, CasStore};
 use bytes::{Bytes, BytesMut};
 use musicfs_core::FileId;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkManifest {
@@ -116,7 +116,31 @@ impl FileReader {
                 continue;
             }
 
-            let chunk_data = self.store.get(&chunk_ref.hash).await?;
+            let chunk_data = match self.store.get(&chunk_ref.hash).await {
+                Ok(data) => data,
+                Err(CasError::IntegrityError { .. }) => {
+                    warn!(hash = %chunk_ref.hash, "Chunk corrupt, deleting and re-fetching");
+                    let _ = self.store.delete(&chunk_ref.hash).await;
+                    if let Some(fetcher) = &self.fetcher {
+                        let new_manifest = fetcher.fetch_file(file_id).await?;
+                        self.manifests.write().insert(file_id, new_manifest);
+                        self.store.get(&chunk_ref.hash).await?
+                    } else {
+                        return Err(ReaderError::Cas(CasError::NotFound(chunk_ref.hash.as_hex())));
+                    }
+                }
+                Err(CasError::NotFound(_)) => {
+                    warn!(hash = %chunk_ref.hash, "Chunk missing, attempting re-fetch");
+                    if let Some(fetcher) = &self.fetcher {
+                        let new_manifest = fetcher.fetch_file(file_id).await?;
+                        self.manifests.write().insert(file_id, new_manifest);
+                        self.store.get(&chunk_ref.hash).await?
+                    } else {
+                        return Err(ReaderError::Cas(CasError::NotFound(chunk_ref.hash.as_hex())));
+                    }
+                }
+                Err(e) => return Err(ReaderError::Cas(e)),
+            };
 
             let read_start = if offset > chunk_start {
                 (offset - chunk_start) as usize

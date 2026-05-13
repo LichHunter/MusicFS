@@ -1,11 +1,12 @@
 use crate::traits::Origin;
 use dashmap::DashMap;
+use futures::future::join_all;
 use musicfs_core::{Event, EventBus, HealthStatus, OriginId, OriginType};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use tracing::{debug, info, info_span, Instrument};
+use tracing::{debug, info, info_span, warn, Instrument};
 
 pub struct HealthMonitor {
     origins: DashMap<OriginId, Arc<dyn Origin>>,
@@ -187,14 +188,30 @@ impl HealthMonitor {
             .map(|e| (e.key().clone(), e.value().clone()))
             .collect();
 
-        for (id, origin) in origins {
-            self.check_one(&id, &origin).await;
-        }
+        let checks: Vec<_> = origins
+            .iter()
+            .map(|(id, origin)| self.check_one(id, origin))
+            .collect();
+
+        join_all(checks).await;
     }
 
     async fn check_one(&self, id: &OriginId, origin: &Arc<dyn Origin>) {
         let start = Instant::now();
-        let status = origin.health().await;
+        let health_timeout = Duration::from_millis(1500);
+
+        let status = match tokio::time::timeout(health_timeout, origin.health()).await {
+            Ok(status) => status,
+            Err(_) => {
+                warn!(
+                    origin_id = %id,
+                    timeout_ms = health_timeout.as_millis() as u64,
+                    "Health check timed out"
+                );
+                HealthStatus::Unhealthy
+            }
+        };
+
         let latency_ms = start.elapsed().as_millis() as u64;
 
         let threshold = self.threshold_for(origin.origin_type());

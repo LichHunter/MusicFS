@@ -386,17 +386,25 @@ impl Filesystem for MusicFs {
         let handle = self.runtime_handle.clone();
         let result = std::thread::scope(|_| {
             handle.block_on(async {
-                reader.read(file_id, offset as u64, size).await
+                tokio::time::timeout(
+                    Duration::from_secs(30),
+                    reader.read(file_id, offset as u64, size),
+                )
+                .await
             })
         });
 
         match result {
-            Ok(data) => {
+            Ok(Ok(data)) => {
                 trace!(ino, offset, size_bytes = size, bytes_read = data.len(), "read successful");
                 reply.data(&data);
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 warn!(ino, offset, size_bytes = size, error = %e, "read failed");
+                reply.error(libc::EIO);
+            }
+            Err(_timeout) => {
+                warn!(ino, offset, size_bytes = size, "read timed out after 30s");
                 reply.error(libc::EIO);
             }
         }

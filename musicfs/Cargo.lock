@@ -1929,6 +1929,7 @@ dependencies = [
  "anyhow",
  "clap",
  "dirs",
+ "libc",
  "musicfs-cache",
  "musicfs-cas",
  "musicfs-core",
@@ -2018,6 +2019,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "dashmap",
+ "futures",
  "libc",
  "musicfs-core",
  "parking_lot 0.12.5",

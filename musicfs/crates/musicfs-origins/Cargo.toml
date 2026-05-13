@@ -12,6 +12,7 @@ sftp = []
 musicfs-core = { path = "../musicfs-core" }
 async-trait.workspace = true
 dashmap.workspace = true
+futures.workspace = true
 libc.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "sync", "time"] }
