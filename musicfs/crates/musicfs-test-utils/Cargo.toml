@@ -9,6 +9,7 @@ musicfs-core = { path = "../musicfs-core" }
 musicfs-origins = { path = "../musicfs-origins" }
 musicfs-cas = { path = "../musicfs-cas" }
 musicfs-cache = { path = "../musicfs-cache" }
+musicfs-search = { path = "../musicfs-search" }
 
 async-trait.workspace = true
 tokio = { workspace = true, features = ["full", "sync", "time"] }
@@ -37,5 +38,6 @@ full = ["failpoints", "process-tests", "resource-limits", "docker-tests"]
 
 [dev-dependencies]
 tokio-test = "0.4"
+tokio-util.workspace = true
 sd-notify.workspace = true
 libc.workspace = true

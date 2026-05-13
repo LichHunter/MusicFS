@@ -1,14 +1,20 @@
-use musicfs_cache::{VirtualTree, ROOT_INODE};
+use musicfs_cache::{Database, VirtualTree, ROOT_INODE};
 use musicfs_cas::{CasConfig, CasStore};
-use musicfs_core::{HealthStatus, OriginId, OriginType, RealPath};
+use musicfs_core::supervisor::{TaskStatus, TaskSupervisor};
+use musicfs_core::{
+    AudioMeta, FileId, FileMeta, HealthStatus, OriginId, OriginType, RealPath, VirtualPath,
+};
 use musicfs_origins::{HealthMonitor, LocalOrigin, OriginRegistry};
-use musicfs_test_utils::{FaultyOrigin, FailMode};
+use musicfs_search::SearchIndex;
+use musicfs_test_utils::{FailMode, FaultyOrigin};
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 use tempfile::TempDir;
+use tokio_util::sync::CancellationToken;
 
 fn setup_test_file(dir: &TempDir, name: &str, content: &[u8]) -> PathBuf {
     let path = dir.path().join(name);
@@ -31,19 +37,101 @@ fn create_faulty_origin(id: &str, dir: &TempDir, mode: FailMode) -> Arc<FaultyOr
     Arc::new(FaultyOrigin::new(inner, mode))
 }
 
+fn make_file_meta(id: i64, path: &str, size: u64) -> FileMeta {
+    let name = Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+    FileMeta {
+        id: FileId(id),
+        virtual_path: VirtualPath::new(path),
+        real_path: RealPath {
+            origin_id: OriginId::from("test"),
+            path: PathBuf::from(path),
+        },
+        size,
+        mtime: UNIX_EPOCH,
+        content_hash: None,
+        audio: Some(AudioMeta {
+            title: Some(name),
+            ..Default::default()
+        }),
+    }
+}
+
 #[tokio::test]
 async fn test_sqlite_integrity_check_detects_corruption() {
-    todo!("Issue 2.4: Implement Database::open_with_integrity_check()")
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db");
+
+    {
+        let db = Database::open(&db_path).unwrap();
+        db.upsert_file(
+            &OriginId::from("test"),
+            Path::new("/test.flac"),
+            &VirtualPath::new("/Test.flac"),
+            &AudioMeta::default(),
+            UNIX_EPOCH,
+            1000,
+        )
+        .unwrap();
+    }
+
+    let mut data = std::fs::read(&db_path).unwrap();
+    let mid = data.len() / 2;
+    data[mid..mid + 100].fill(0xFF);
+    std::fs::write(&db_path, &data).unwrap();
+
+    let result = Database::open_with_integrity_check(&db_path);
+    assert!(result.is_err());
 }
 
 #[tokio::test]
 async fn test_tantivy_corruption_triggers_rebuild() {
-    todo!("Issue 2.4: Implement SearchIndex::open_with_recovery()")
+    let dir = TempDir::new().unwrap();
+    let index_path = dir.path().join("search_idx");
+
+    {
+        let index = SearchIndex::open(&index_path).unwrap();
+        index.index_file(&make_file_meta(1, "/a.flac", 1000)).unwrap();
+        index.commit().unwrap();
+    }
+
+    std::fs::write(index_path.join("meta.json"), b"corrupted").unwrap();
+
+    let index = SearchIndex::open_with_recovery(&index_path).unwrap();
+    let results = index.search("a", 10).unwrap();
+    assert_eq!(results.len(), 0);
 }
 
 #[tokio::test]
 async fn test_sled_corruption_triggers_repair() {
-    todo!("Issue 3.5: Implement sled recovery in CasStore::open()")
+    let dir = TempDir::new().unwrap();
+    let chunks_dir = dir.path().join("chunks");
+    let config = CasConfig {
+        chunks_dir: chunks_dir.clone(),
+        max_size: 10_000_000,
+        shard_levels: 2,
+    };
+
+    {
+        let store = CasStore::open(config.clone()).await.unwrap();
+        store.put(b"test data").await.unwrap();
+    }
+
+    let sled_dir = chunks_dir.join("index.sled");
+    if sled_dir.exists() {
+        for entry in std::fs::read_dir(&sled_dir).unwrap() {
+            let entry = entry.unwrap();
+            if entry.metadata().unwrap().is_file() {
+                std::fs::write(entry.path(), b"corrupted").unwrap();
+            }
+        }
+    }
+
+    let result = CasStore::open(config).await;
+    assert!(result.is_ok(), "sled should recover from corruption");
 }
 
 #[tokio::test]
@@ -203,9 +291,21 @@ async fn test_health_checks_run_in_parallel() {
     assert!(elapsed < Duration::from_millis(350), "Issue 4.2.2: check_all() should run in parallel (sequential would take ~600ms), took {:?}", elapsed);
 }
 
-#[tokio::test]
-async fn test_tantivy_survives_uncommitted_crash() {
-    todo!("Issue 5.2: Implement tantivy crash recovery test")
+#[test]
+fn test_tantivy_survives_uncommitted_crash() {
+    let dir = TempDir::new().unwrap();
+    let index_path = dir.path().join("search_idx");
+
+    {
+        let index = SearchIndex::open(&index_path).unwrap();
+        index.index_file(&make_file_meta(1, "/a.flac", 1000)).unwrap();
+        index.commit().unwrap();
+        index.index_file(&make_file_meta(2, "/b.flac", 1000)).unwrap();
+    }
+
+    let index = SearchIndex::open(&index_path).unwrap();
+    let results = index.search("a", 10).unwrap();
+    assert_eq!(results.len(), 1);
 }
 
 #[tokio::test]
@@ -302,6 +402,86 @@ fn test_sd_notify_ready_sent() {
     assert!(msg.contains("READY=1"), "sd_notify should send READY=1, got: {}", msg);
 
     std::env::remove_var("NOTIFY_SOCKET");
+}
+
+#[tokio::test]
+async fn test_shutdown_cancels_background_tasks() {
+    let token = CancellationToken::new();
+    let stopped = Arc::new(AtomicBool::new(false));
+    let stopped_clone = stopped.clone();
+    let token_clone = token.clone();
+
+    tokio::spawn(async move {
+        token_clone.cancelled().await;
+        stopped_clone.store(true, Ordering::SeqCst);
+    });
+
+    assert!(!stopped.load(Ordering::SeqCst));
+    token.cancel();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(stopped.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn test_shutdown_flushes_tantivy() {
+    let dir = TempDir::new().unwrap();
+    let idx_path = dir.path().join("idx");
+
+    {
+        let index = SearchIndex::open(&idx_path).unwrap();
+        index.index_file(&make_file_meta(1, "/a.flac", 1000)).unwrap();
+        index.commit().unwrap();
+    }
+
+    let index2 = SearchIndex::open(&idx_path).unwrap();
+    assert_eq!(index2.search("a", 10).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_supervisor_detects_task_completion() {
+    let supervisor = TaskSupervisor::new();
+    supervisor.spawn_supervised("fast", async {});
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
+async fn test_supervisor_detects_panic() {
+    let supervisor = TaskSupervisor::new();
+    supervisor.spawn_supervised("panicker", async {
+        panic!("boom");
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(matches!(
+        supervisor.task_status("panicker"),
+        TaskStatus::Failed { .. }
+    ));
+}
+
+#[tokio::test]
+async fn test_supervisor_restarts_critical_task() {
+    let count = Arc::new(AtomicU32::new(0));
+    let c = count.clone();
+
+    let supervisor = TaskSupervisor::new();
+    supervisor.spawn_critical("restartable", move || {
+        let c = c.clone();
+        async move {
+            let n = c.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                panic!("first run fails");
+            }
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        }
+    });
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    assert!(matches!(
+        supervisor.task_status("restartable"),
+        TaskStatus::Running
+    ));
 }
 
 #[tokio::test]

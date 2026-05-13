@@ -6,7 +6,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 const SCHEMA: &str = include_str!("schema.sql");
 
@@ -29,6 +29,34 @@ impl Database {
         };
         let count = db.file_count().unwrap_or(0);
         info!(path = ?path, file_count = count, "Database opened");
+        Ok(db)
+    }
+
+    pub fn open_with_integrity_check(path: &Path) -> Result<Self> {
+        debug!(?path, "Opening database with integrity check");
+
+        let conn = Connection::open(path)
+            .map_err(|e| Error::Database(format!("open failed: {}", e)))?;
+
+        let integrity: String = conn
+            .query_row("PRAGMA integrity_check(1)", [], |row| row.get(0))
+            .map_err(|e| Error::Database(format!("integrity check failed: {}", e)))?;
+
+        if integrity != "ok" {
+            warn!(path = ?path, result = %integrity, "Database integrity check failed");
+            return Err(Error::DatabaseCorrupted(format!(
+                "integrity check failed: {}", integrity
+            )));
+        }
+
+        conn.execute_batch(SCHEMA)
+            .map_err(|e| Error::Database(format!("schema init failed: {}", e)))?;
+
+        let db = Self {
+            conn: Arc::new(Mutex::new(conn)),
+        };
+        let count = db.file_count().unwrap_or(0);
+        info!(path = ?path, file_count = count, "Database opened (integrity verified)");
         Ok(db)
     }
 

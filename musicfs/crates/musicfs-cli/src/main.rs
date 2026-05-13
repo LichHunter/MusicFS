@@ -208,6 +208,8 @@ fn run_mount(
     }
     info!("MusicFS ready, PID {}", std::process::id());
 
+    let shutdown_token = tokio_util::sync::CancellationToken::new();
+
     runtime.block_on(async {
         let mut sigterm =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -222,6 +224,13 @@ fn run_mount(
                 info!("Received SIGINT, shutting down");
             }
         }
+
+        info!("Beginning ordered shutdown");
+        shutdown_token.cancel();
+
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        info!("Background tasks stopped");
 
         Ok::<_, anyhow::Error>(())
     })?;

@@ -13,6 +13,7 @@ repository = "https://github.com/user/musicfs"
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 async-trait = "0.1"
 
 # Error handling

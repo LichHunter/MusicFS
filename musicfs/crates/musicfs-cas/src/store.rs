@@ -4,7 +4,7 @@ use musicfs_core::ChunkHash;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::fs;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 #[cfg(feature = "failpoints")]
 use fail::fail_point;
@@ -45,7 +45,27 @@ impl CasStore {
         fs::create_dir_all(&config.chunks_dir).await?;
 
         let index_path = config.chunks_dir.join("index.sled");
-        let index = sled::open(&index_path)?;
+        let index = match sled::open(&index_path) {
+            Ok(db) => db,
+            Err(e) => {
+                warn!(error = %e, path = ?index_path, "sled index corrupted, attempting recovery");
+
+                match sled::Config::new().path(&index_path).open() {
+                    Ok(db) => {
+                        info!("sled index repaired successfully");
+                        db
+                    }
+                    Err(repair_err) => {
+                        warn!(error = %repair_err, "sled repair failed, recreating index");
+                        if index_path.exists() {
+                            std::fs::remove_dir_all(&index_path)
+                                .map_err(CasError::Io)?;
+                        }
+                        sled::open(&index_path)?
+                    }
+                }
+            }
+        };
 
         let current_size = Self::calculate_size(&config.chunks_dir).await;
 
@@ -77,6 +97,22 @@ impl CasStore {
         if path.exists() {
             trace!(hash = %hash, size_bytes = data.len(), "dedup hit");
             return Ok(hash);
+        }
+
+        if self.config.max_size > 0 {
+            let new_size = self.current_size.load(Ordering::SeqCst) + data.len() as u64;
+            if new_size > self.config.max_size {
+                warn!(
+                    current_size = self.current_size.load(Ordering::SeqCst),
+                    chunk_size = data.len(),
+                    max_size = self.config.max_size,
+                    "CAS store full, rejecting write"
+                );
+                return Err(CasError::StoreFull {
+                    current: self.current_size.load(Ordering::SeqCst),
+                    max: self.config.max_size,
+                });
+            }
         }
 
         if let Some(parent) = path.parent() {
@@ -251,6 +287,9 @@ pub enum CasError {
 
     #[error("Serialization error: {0}")]
     Serialization(String),
+
+    #[error("Store full: {current} / {max} bytes")]
+    StoreFull { current: u64, max: u64 },
 }
 
 #[cfg(test)]

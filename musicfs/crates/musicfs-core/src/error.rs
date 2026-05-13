@@ -23,6 +23,9 @@ pub enum Error {
     #[error("Database error: {0}")]
     Database(String),
 
+    #[error("Database corrupted: {0}")]
+    DatabaseCorrupted(String),
+
     #[error("NFS stale file handle")]
     NfsStaleHandle,
 

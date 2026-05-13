@@ -4,6 +4,7 @@ pub mod error;
 pub mod events;
 pub mod metrics;
 pub mod resolver;
+pub mod supervisor;
 pub mod types;
 
 pub use config::{

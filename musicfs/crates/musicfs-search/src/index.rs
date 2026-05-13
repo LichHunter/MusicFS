@@ -6,7 +6,7 @@ use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, FuzzyTermQuery, Occur, Query, QueryParser};
 use tantivy::schema::{Field, Schema, Value, STORED, TEXT, INDEXED};
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -93,6 +93,28 @@ impl SearchIndex {
             schema: schema_obj,
             schema_version: SCHEMA_VERSION,
         })
+    }
+
+    pub fn open_with_recovery(index_path: &Path) -> Result<Self, SearchError> {
+        match Self::open(index_path) {
+            Ok(index) => {
+                let docs = index.reader.searcher().num_docs();
+                info!(docs, "Search index opened successfully");
+                Ok(index)
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    path = ?index_path,
+                    "Search index corrupted, rebuilding from scratch"
+                );
+                if index_path.exists() {
+                    std::fs::remove_dir_all(index_path)
+                        .map_err(SearchError::Io)?;
+                }
+                Self::open(index_path)
+            }
+        }
     }
 
     pub fn index_file(&self, file: &FileMeta) -> Result<(), SearchError> {
