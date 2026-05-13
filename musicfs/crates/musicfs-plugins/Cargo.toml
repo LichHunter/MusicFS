@@ -4,3 +4,20 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+musicfs-core = { path = "../musicfs-core" }
+async-trait.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+libloading = "0.8"
+wasmtime = { version = "19", optional = true }
+semver = "1"
+
+[features]
+default = []
+wasm = ["wasmtime"]
+
+[dev-dependencies]
+tempfile.workspace = true

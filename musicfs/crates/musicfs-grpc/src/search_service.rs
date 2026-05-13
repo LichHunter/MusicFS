@@ -1,9 +1,13 @@
 use crate::proto::musicfs::v1::{
-    music_fs_server::MusicFs, SearchRequest, SearchResponse, SearchResult,
+    music_fs_server::MusicFs, CacheStats, ClearCacheRequest, ClearCacheResponse, Empty, Event,
+    EventFilter, OriginHealthResponse, OriginRequest, OriginsResponse, PrefetchProgress,
+    PrefetchRequest, SearchRequest, SearchResponse, SearchResult, ShutdownRequest, StatusResponse,
+    SyncProgress,
 };
 use musicfs_search::SearchIndex;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use tracing::debug;
 
@@ -74,7 +78,7 @@ impl MusicFs for SearchService {
         }))
     }
 
-    type SearchStreamStream = tokio_stream::wrappers::ReceiverStream<Result<SearchResult, Status>>;
+    type SearchStreamStream = ReceiverStream<Result<SearchResult, Status>>;
 
     async fn search_stream(
         &self,
@@ -112,9 +116,94 @@ impl MusicFs for SearchService {
             }
         });
 
-        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
-            rx,
-        )))
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn get_status(
+        &self,
+        _request: Request<Empty>,
+    ) -> Result<Response<StatusResponse>, Status> {
+        Err(Status::unimplemented(
+            "Use MusicFsServer for control operations",
+        ))
+    }
+
+    async fn shutdown(
+        &self,
+        _request: Request<ShutdownRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        Err(Status::unimplemented(
+            "Use MusicFsServer for control operations",
+        ))
+    }
+
+    async fn get_cache_stats(
+        &self,
+        _request: Request<Empty>,
+    ) -> Result<Response<CacheStats>, Status> {
+        Err(Status::unimplemented(
+            "Use MusicFsServer for control operations",
+        ))
+    }
+
+    async fn clear_cache(
+        &self,
+        _request: Request<ClearCacheRequest>,
+    ) -> Result<Response<ClearCacheResponse>, Status> {
+        Err(Status::unimplemented(
+            "Use MusicFsServer for control operations",
+        ))
+    }
+
+    type PrefetchStream = ReceiverStream<Result<PrefetchProgress, Status>>;
+
+    async fn prefetch(
+        &self,
+        _request: Request<PrefetchRequest>,
+    ) -> Result<Response<Self::PrefetchStream>, Status> {
+        Err(Status::unimplemented(
+            "Use MusicFsServer for control operations",
+        ))
+    }
+
+    async fn list_origins(
+        &self,
+        _request: Request<Empty>,
+    ) -> Result<Response<OriginsResponse>, Status> {
+        Err(Status::unimplemented(
+            "Use MusicFsServer for control operations",
+        ))
+    }
+
+    async fn get_origin_health(
+        &self,
+        _request: Request<OriginRequest>,
+    ) -> Result<Response<OriginHealthResponse>, Status> {
+        Err(Status::unimplemented(
+            "Use MusicFsServer for control operations",
+        ))
+    }
+
+    type RescanOriginStream = ReceiverStream<Result<SyncProgress, Status>>;
+
+    async fn rescan_origin(
+        &self,
+        _request: Request<OriginRequest>,
+    ) -> Result<Response<Self::RescanOriginStream>, Status> {
+        Err(Status::unimplemented(
+            "Use MusicFsServer for control operations",
+        ))
+    }
+
+    type SubscribeEventsStream = ReceiverStream<Result<Event, Status>>;
+
+    async fn subscribe_events(
+        &self,
+        _request: Request<EventFilter>,
+    ) -> Result<Response<Self::SubscribeEventsStream>, Status> {
+        Err(Status::unimplemented(
+            "Use MusicFsServer for control operations",
+        ))
     }
 }
 

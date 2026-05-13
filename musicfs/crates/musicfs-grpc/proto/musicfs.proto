@@ -5,7 +5,18 @@ package musicfs.v1;
 service MusicFS {
   rpc Search(SearchRequest) returns (SearchResponse);
   rpc SearchStream(SearchRequest) returns (stream SearchResult);
+  rpc GetStatus(Empty) returns (StatusResponse);
+  rpc Shutdown(ShutdownRequest) returns (Empty);
+  rpc GetCacheStats(Empty) returns (CacheStats);
+  rpc ClearCache(ClearCacheRequest) returns (ClearCacheResponse);
+  rpc Prefetch(PrefetchRequest) returns (stream PrefetchProgress);
+  rpc ListOrigins(Empty) returns (OriginsResponse);
+  rpc GetOriginHealth(OriginRequest) returns (OriginHealthResponse);
+  rpc RescanOrigin(OriginRequest) returns (stream SyncProgress);
+  rpc SubscribeEvents(EventFilter) returns (stream Event);
 }
+
+message Empty {}
 
 message SearchRequest {
   string query = 1;
@@ -28,4 +39,138 @@ message SearchResult {
   optional string title = 5;
   float score = 6;
   map<string, string> highlights = 7;
+}
+
+enum MountState {
+  MOUNT_UNKNOWN = 0;
+  MOUNT_MOUNTING = 1;
+  MOUNT_READY = 2;
+  MOUNT_SYNCING = 3;
+  MOUNT_DEGRADED = 4;
+  MOUNT_UNMOUNTING = 5;
+}
+
+message StatusResponse {
+  string version = 1;
+  uint64 uptime_secs = 2;
+  string mount_point = 3;
+  MountState state = 4;
+  uint32 open_file_handles = 5;
+  uint64 fuse_ops_total = 6;
+  uint64 files_indexed = 7;
+  uint64 cache_size_bytes = 8;
+  repeated OriginStatus origins = 9;
+}
+
+message OriginStatus {
+  string id = 1;
+  string origin_type = 2;
+  HealthStatus health = 3;
+  uint64 files_count = 4;
+}
+
+enum HealthStatus {
+  HEALTH_UNKNOWN = 0;
+  HEALTH_HEALTHY = 1;
+  HEALTH_DEGRADED = 2;
+  HEALTH_UNHEALTHY = 3;
+}
+
+message ShutdownRequest {
+  bool graceful = 1;
+  uint32 timeout_secs = 2;
+}
+
+message TierStats {
+  uint64 entries = 1;
+  uint64 size_bytes = 2;
+  uint64 hits = 3;
+  uint64 misses = 4;
+}
+
+message CacheStats {
+  uint64 total_size_bytes = 1;
+  uint64 used_size_bytes = 2;
+  uint64 size_limit_bytes = 3;
+  uint64 chunk_count = 4;
+  uint64 chunks_unique = 5;
+  double dedup_ratio = 6;
+  uint64 hit_count = 7;
+  uint64 miss_count = 8;
+  double hit_ratio = 9;
+  uint64 metadata_entries = 10;
+  uint64 metadata_bytes = 11;
+  TierStats l1_metadata = 12;
+  TierStats l2_headers = 13;
+  TierStats l3_chunks = 14;
+}
+
+message ClearCacheRequest {
+  optional string origin_id = 1;
+  bool clear_metadata = 2;
+  bool clear_chunks = 3;
+}
+
+message ClearCacheResponse {
+  uint64 bytes_cleared = 1;
+  uint64 chunks_cleared = 2;
+}
+
+message PrefetchRequest {
+  repeated string paths = 1;
+  optional string origin_id = 2;
+}
+
+message PrefetchProgress {
+  string current_path = 1;
+  uint32 completed = 2;
+  uint32 total = 3;
+  uint64 bytes_fetched = 4;
+}
+
+message OriginsResponse {
+  repeated OriginInfo origins = 1;
+}
+
+message OriginInfo {
+  string id = 1;
+  string origin_type = 2;
+  string display_name = 3;
+  string root_path = 4;
+  HealthStatus health = 5;
+  uint64 files_count = 6;
+  uint64 total_size_bytes = 7;
+}
+
+message OriginRequest {
+  string origin_id = 1;
+}
+
+message OriginHealthResponse {
+  string origin_id = 1;
+  HealthStatus status = 2;
+  optional string message = 3;
+  uint64 last_check_secs = 4;
+}
+
+message SyncProgress {
+  string phase = 1;
+  uint32 current = 2;
+  uint32 total = 3;
+  string current_path = 4;
+  uint64 bytes_synced = 5;
+}
+
+message EventFilter {
+  repeated string event_types = 1;
+  optional string origin_id = 2;
+}
+
+message Event {
+  string event_type = 1;
+  int64 timestamp_ms = 2;
+  optional string origin_id = 3;
+  optional string path = 4;
+  optional int64 file_id = 5;
+  map<string, string> metadata = 6;
 }

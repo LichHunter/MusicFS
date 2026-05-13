@@ -7,6 +7,11 @@ pub mod proto {
 }
 
 mod search_service;
+mod server;
+mod webhook;
 
-pub use proto::musicfs::v1::music_fs_server::{MusicFs, MusicFsServer};
+pub use proto::musicfs::v1::music_fs_server::{MusicFs, MusicFsServer as MusicFsGrpcServer};
+pub use proto::musicfs::v1::*;
 pub use search_service::SearchService;
+pub use server::MusicFsServer;
+pub use webhook::{WebhookConfig, WebhookHandler, WebhookPayload};

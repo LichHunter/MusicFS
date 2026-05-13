@@ -1,0 +1,21 @@
+[Unit]
+Description=MusicFS - Metadata-Organized Music Filesystem
+After=network.target
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/musicfs mount --config /etc/musicfs/config.toml /mnt/music
+ExecStop=/usr/bin/musicfs shutdown
+Restart=on-failure
+RestartSec=5
+User=musicfs
+Group=musicfs
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/cache/musicfs /mnt/music
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

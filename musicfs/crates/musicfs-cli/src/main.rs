@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use musicfs_cache::TreeBuilder;
 use musicfs_cas::{CasConfig, CasStore, ContentFetcher, FileReader};
 use musicfs_core::{FileId, FileMeta, OriginId, RealPath, VirtualPath};
@@ -15,33 +15,111 @@ use tracing::{debug, info};
 #[command(name = "musicfs")]
 #[command(about = "Virtual FUSE filesystem for music libraries")]
 struct Cli {
-    #[arg(help = "Mount point for the virtual filesystem")]
-    mountpoint: PathBuf,
-
-    #[arg(short, long, help = "Source music directory (origin)")]
-    origin: PathBuf,
-
-    #[arg(short, long, help = "Cache directory for CAS chunks")]
-    cache_dir: Option<PathBuf>,
-
-    #[arg(short, long, default_value = "info", help = "Log level (debug, info, warn, error)")]
+    #[arg(short, long, default_value = "info", help = "Log level")]
     log_level: String,
+
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    Mount {
+        #[arg(short, long, help = "Config file path")]
+        config: Option<PathBuf>,
+        #[arg(help = "Mount point")]
+        mountpoint: PathBuf,
+        #[arg(short, long, help = "Source music directory")]
+        origin: Option<PathBuf>,
+        #[arg(short = 'd', long, help = "Cache directory")]
+        cache_dir: Option<PathBuf>,
+    },
+    Status,
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommands,
+    },
+    Search {
+        query: String,
+        #[arg(short, long, default_value = "100")]
+        limit: u32,
+    },
+    Origin {
+        #[command(subcommand)]
+        command: OriginCommands,
+    },
+    Events {
+        #[arg(short, long, help = "Filter by event type")]
+        r#type: Option<String>,
+    },
+    Shutdown {
+        #[arg(short, long, default_value = "true")]
+        graceful: bool,
+        #[arg(short, long, default_value = "30")]
+        timeout: u32,
+    },
+}
+
+#[derive(Subcommand)]
+enum CacheCommands {
+    Stats,
+    Clear {
+        #[arg(help = "Origin to clear cache for")]
+        origin: Option<String>,
+    },
+    Prefetch {
+        #[arg(help = "Paths to prefetch")]
+        paths: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum OriginCommands {
+    List,
+    Health {
+        origin_id: String,
+    },
+    Rescan {
+        origin_id: String,
+    },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-
     init_logging(&cli.log_level);
+
+    match cli.command {
+        Commands::Mount {
+            config: _,
+            mountpoint,
+            origin,
+            cache_dir,
+        } => run_mount(mountpoint, origin, cache_dir),
+        Commands::Status => run_status(),
+        Commands::Cache { command } => run_cache(command),
+        Commands::Search { query, limit } => run_search(&query, limit),
+        Commands::Origin { command } => run_origin(command),
+        Commands::Events { r#type } => run_events(r#type),
+        Commands::Shutdown { graceful, timeout } => run_shutdown(graceful, timeout),
+    }
+}
+
+fn run_mount(
+    mountpoint: PathBuf,
+    origin_path: Option<PathBuf>,
+    cache_dir: Option<PathBuf>,
+) -> Result<()> {
+    let origin_path = origin_path.context("--origin is required for mount")?;
 
     let runtime = tokio::runtime::Runtime::new().context("Failed to create Tokio runtime")?;
     let handle = runtime.handle().clone();
 
     let (tree, reader) = runtime.block_on(async {
         info!("MusicFS starting...");
-        info!("Origin: {:?}", cli.origin);
-        info!("Mountpoint: {:?}", cli.mountpoint);
+        info!("Origin: {:?}", origin_path);
+        info!("Mountpoint: {:?}", mountpoint);
 
-        let cache_dir = cli.cache_dir.unwrap_or_else(|| {
+        let cache_dir = cache_dir.unwrap_or_else(|| {
             dirs::cache_dir()
                 .unwrap_or_else(|| PathBuf::from("/tmp"))
                 .join("musicfs")
@@ -49,24 +127,28 @@ fn main() -> Result<()> {
         info!("Cache directory: {:?}", cache_dir);
 
         std::fs::create_dir_all(&cache_dir).context("Failed to create cache directory")?;
-        std::fs::create_dir_all(&cli.mountpoint).context("Failed to create mountpoint")?;
+        std::fs::create_dir_all(&mountpoint).context("Failed to create mountpoint")?;
 
         let cas_config = CasConfig {
             chunks_dir: cache_dir.join("chunks"),
             ..Default::default()
         };
-        let store = Arc::new(CasStore::open(cas_config).await.context("Failed to open CAS store")?);
+        let store = Arc::new(
+            CasStore::open(cas_config)
+                .await
+                .context("Failed to open CAS store")?,
+        );
         info!("CAS store initialized");
 
         let origin_id = OriginId::from("local");
-        let origin = Arc::new(LocalOrigin::new(origin_id.clone(), cli.origin.clone()));
+        let origin = Arc::new(LocalOrigin::new(origin_id.clone(), origin_path.clone()));
         info!("Origin registered: {}", origin.display_name());
 
         let fetcher = Arc::new(ContentFetcher::new(store.clone()));
         fetcher.register_origin(origin);
 
         info!("Scanning music files...");
-        let files = scan_music_files(&cli.origin, &origin_id).await?;
+        let files = scan_music_files(&origin_path, &origin_id).await?;
         info!("Found {} music files", files.len());
 
         let mut builder = TreeBuilder::new();
@@ -84,19 +166,84 @@ fn main() -> Result<()> {
 
     let fs = MusicFs::with_reader(tree, reader, handle);
 
-    info!("Mounting filesystem at {:?}", cli.mountpoint);
+    info!("Mounting filesystem at {:?}", mountpoint);
     info!("Press Ctrl+C to unmount");
 
-    fs.mount(&cli.mountpoint).context("Failed to mount filesystem")?;
+    fs.mount(&mountpoint)
+        .context("Failed to mount filesystem")?;
 
+    Ok(())
+}
+
+fn run_status() -> Result<()> {
+    println!("Status: Not connected to daemon");
+    println!("Hint: gRPC client integration pending");
+    Ok(())
+}
+
+fn run_cache(command: CacheCommands) -> Result<()> {
+    match command {
+        CacheCommands::Stats => {
+            println!("Cache stats: gRPC client integration pending");
+        }
+        CacheCommands::Clear { origin } => {
+            println!(
+                "Clearing cache for: {}",
+                origin.as_deref().unwrap_or("all")
+            );
+            println!("gRPC client integration pending");
+        }
+        CacheCommands::Prefetch { paths } => {
+            println!("Prefetching {} paths", paths.len());
+            println!("gRPC client integration pending");
+        }
+    }
+    Ok(())
+}
+
+fn run_search(query: &str, limit: u32) -> Result<()> {
+    println!("Searching for: {} (limit: {})", query, limit);
+    println!("gRPC client integration pending");
+    Ok(())
+}
+
+fn run_origin(command: OriginCommands) -> Result<()> {
+    match command {
+        OriginCommands::List => {
+            println!("Origins: gRPC client integration pending");
+        }
+        OriginCommands::Health { origin_id } => {
+            println!("Health for {}: gRPC client integration pending", origin_id);
+        }
+        OriginCommands::Rescan { origin_id } => {
+            println!("Rescanning {}: gRPC client integration pending", origin_id);
+        }
+    }
+    Ok(())
+}
+
+fn run_events(event_type: Option<String>) -> Result<()> {
+    println!(
+        "Subscribing to events: {}",
+        event_type.as_deref().unwrap_or("all")
+    );
+    println!("gRPC client integration pending");
+    Ok(())
+}
+
+fn run_shutdown(graceful: bool, timeout: u32) -> Result<()> {
+    println!(
+        "Shutdown requested (graceful: {}, timeout: {}s)",
+        graceful, timeout
+    );
+    println!("gRPC client integration pending");
     Ok(())
 }
 
 fn init_logging(level: &str) {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(level));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
 
     tracing_subscriber::registry()
         .with(fmt::layer())
@@ -109,7 +256,15 @@ async fn scan_music_files(dir: &Path, origin_id: &OriginId) -> Result<Vec<FileMe
     let mut files = Vec::new();
     let mut file_id_counter = 1i64;
 
-    scan_dir_recursive(dir, dir, origin_id, &parser, &mut files, &mut file_id_counter).await?;
+    scan_dir_recursive(
+        dir,
+        dir,
+        origin_id,
+        &parser,
+        &mut files,
+        &mut file_id_counter,
+    )
+    .await?;
 
     Ok(files)
 }
@@ -129,7 +284,10 @@ async fn scan_dir_recursive(
         let metadata = entry.metadata().await?;
 
         if metadata.is_dir() {
-            Box::pin(scan_dir_recursive(base, &path, origin_id, parser, files, id_counter)).await?;
+            Box::pin(scan_dir_recursive(
+                base, &path, origin_id, parser, files, id_counter,
+            ))
+            .await?;
         } else if is_audio_file(&path) {
             let relative_path = path.strip_prefix(base).unwrap_or(&path);
 
@@ -156,7 +314,10 @@ async fn scan_dir_recursive(
                 audio: audio_meta,
             };
 
-            debug!("Found: {:?} -> {:?}", file_meta.real_path.path, file_meta.virtual_path);
+            debug!(
+                "Found: {:?} -> {:?}",
+                file_meta.real_path.path, file_meta.virtual_path
+            );
             files.push(file_meta);
             *id_counter += 1;
         }
@@ -167,7 +328,10 @@ async fn scan_dir_recursive(
 
 fn is_audio_file(path: &Path) -> bool {
     matches!(
-        path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref(),
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+            .as_deref(),
         Some("flac" | "mp3" | "ogg" | "wav" | "m4a" | "aac" | "opus")
     )
 }
@@ -176,11 +340,22 @@ fn build_virtual_path(path: &Path, audio: Option<&musicfs_core::AudioMeta>) -> V
     if let Some(meta) = audio {
         let artist = meta.artist.as_deref().unwrap_or("Unknown Artist");
         let album = meta.album.as_deref().unwrap_or("Unknown Album");
-        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("track");
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("track");
 
-        VirtualPath::new(&format!("/{}/{}/{}", sanitize(artist), sanitize(album), filename))
+        VirtualPath::new(&format!(
+            "/{}/{}/{}",
+            sanitize(artist),
+            sanitize(album),
+            filename
+        ))
     } else {
-        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown");
         VirtualPath::new(&format!("/Unknown Artist/Unknown Album/{}", filename))
     }
 }

@@ -23,6 +23,21 @@ Implement audio metadata extraction using symphonia and create SQLite schema for
 
 ---
 
+## Task 0: Extend AudioMeta in `musicfs-core`
+
+Add `lyrics` and `composer` fields to `AudioMeta` struct (FR-6.4):
+
+```rust
+// In musicfs-core/src/types.rs, add to AudioMeta:
+pub struct AudioMeta {
+    // ... existing fields ...
+    pub lyrics: Option<String>,
+    pub composer: Option<String>,
+}
+```
+
+---
+
 ## Task 1: Metadata Parser (`musicfs-metadata`)
 
 ### 1.1 Create `Cargo.toml`
@@ -167,6 +182,12 @@ impl MetadataParser {
                     StandardTagKey::Date | StandardTagKey::ReleaseDate => {
                         meta.year = value.chars().take(4).collect::<String>()
                             .parse().ok();
+                    }
+                    StandardTagKey::Lyrics => {
+                        meta.lyrics = Some(value);
+                    }
+                    StandardTagKey::Composer => {
+                        meta.composer = Some(value);
                     }
                     _ => {}
                 }
