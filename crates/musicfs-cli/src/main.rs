@@ -7,12 +7,14 @@ use musicfs_fuse::MusicFs;
 use musicfs_metadata::MetadataParser;
 use musicfs_origins::{LocalOrigin, Origin};
 use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
+use toml::Value;
 use tracing::{debug, info, warn};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter, Layer};
@@ -115,17 +117,54 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Mount {
-            config: _,
+            config,
             mountpoint,
             origin,
             cache_dir,
         } => {
-            let log_config = LoggingConfig {
-                level: cli.log_level,
-                ..Default::default()
+            let mut config = if let Some(config_path) = config {
+                musicfs_core::Config::from_file(&config_path)?
+            } else {
+                let origin_path = origin
+                    .context("--origin is required for mount if no config file is provided")?;
+                let cache_dir = cache_dir.clone().unwrap_or_else(|| {
+                    dirs::cache_dir()
+                        .unwrap_or_else(|| PathBuf::from("/tmp"))
+                        .join("musicfs")
+                });
+
+                let mut settings = HashMap::new();
+                settings.insert(
+                    "path".to_string(),
+                    Value::String(origin_path.to_string_lossy().into_owned()),
+                );
+
+                musicfs_core::Config {
+                    mount_point: mountpoint.clone(),
+                    cache_dir: cache_dir.clone(),
+                    origins: vec![musicfs_core::OriginConfig {
+                        id: "local".to_string(),
+                        origin_type: musicfs_core::OriginType::Local,
+                        priority: 1,
+                        enabled: true,
+                        settings,
+                    }],
+                    cache: Default::default(),
+                    health: Default::default(),
+                    logging: LoggingConfig {
+                        level: cli.log_level.clone(),
+                        ..Default::default()
+                    },
+                }
             };
-            let _guard = init_logging(&log_config)?;
-            run_mount(mountpoint, origin, cache_dir)
+
+            if let Some(c_dir) = cache_dir {
+                config.cache_dir = c_dir;
+            }
+            config.mount_point = mountpoint;
+
+            let _guard = init_logging(&config.logging)?;
+            run_mount(config)
         }
         Commands::Status => {
             init_basic_logging(&cli.log_level);
@@ -154,32 +193,19 @@ fn main() -> Result<()> {
     }
 }
 
-fn run_mount(
-    mountpoint: PathBuf,
-    origin_path: Option<PathBuf>,
-    cache_dir: Option<PathBuf>,
-) -> Result<()> {
-    let origin_path = origin_path.context("--origin is required for mount")?;
-
-    let cache_dir = cache_dir.unwrap_or_else(|| {
-        dirs::cache_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join("musicfs")
-    });
-
+fn run_mount(config: musicfs_core::Config) -> Result<()> {
     let runtime = tokio::runtime::Runtime::new().context("Failed to create Tokio runtime")?;
     let handle = runtime.handle().clone();
 
-    let cache_dir_clone = cache_dir.clone();
     let (tree, reader) = runtime.block_on(async {
-        info!(origin = ?origin_path, mountpoint = ?mountpoint, "Mount configuration");
-        info!("Cache directory: {:?}", cache_dir_clone);
+        info!(mountpoint = ?config.mount_point, "Mount configuration");
+        info!("Cache directory: {:?}", config.cache_dir);
 
-        std::fs::create_dir_all(&cache_dir_clone).context("Failed to create cache directory")?;
-        std::fs::create_dir_all(&mountpoint).context("Failed to create mountpoint")?;
+        std::fs::create_dir_all(&config.cache_dir).context("Failed to create cache directory")?;
+        std::fs::create_dir_all(&config.mount_point).context("Failed to create mountpoint")?;
 
         let cas_config = CasConfig {
-            chunks_dir: cache_dir_clone.join("chunks"),
+            chunks_dir: config.cache_dir.join("chunks"),
             ..Default::default()
         };
         let store = Arc::new(
@@ -189,16 +215,53 @@ fn run_mount(
         );
         info!("CAS store initialized");
 
-        let origin_id = OriginId::from("local");
-        let origin = Arc::new(LocalOrigin::new(origin_id.clone(), origin_path.clone()));
-        info!("Origin registered: {}", origin.display_name());
-
         let fetcher = Arc::new(ContentFetcher::new(store.clone()));
-        fetcher.register_origin(origin);
+        let mut files = Vec::new();
 
-        info!("Scanning music files...");
-        let files = scan_music_files(&origin_path, &origin_id).await?;
-        info!("Found {} music files", files.len());
+        for origin_cfg in &config.origins {
+            if !origin_cfg.enabled {
+                continue;
+            }
+
+            let origin_id = OriginId::from(origin_cfg.id.as_str());
+            let origin: Arc<dyn Origin> = match origin_cfg.origin_type {
+                musicfs_core::OriginType::Local => {
+                    let path_str = origin_cfg
+                        .settings
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .context("path required for local origin")?;
+                    Arc::new(LocalOrigin::new(origin_id.clone(), PathBuf::from(path_str)))
+                }
+                _ => {
+                    warn!(
+                        "Origin type {:?} not supported in CLI yet, skipping",
+                        origin_cfg.origin_type
+                    );
+                    continue;
+                }
+            };
+
+            info!("Origin registered: {}", origin.display_name());
+            fetcher.register_origin(origin.clone());
+
+            if origin_cfg.origin_type == musicfs_core::OriginType::Local {
+                let path_str = origin_cfg
+                    .settings
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap();
+                let origin_path = PathBuf::from(path_str);
+                info!("Scanning music files for origin {}...", origin_cfg.id);
+                let origin_files = scan_music_files(&origin_path, &origin_id).await?;
+                info!(
+                    "Fount {} music files for origin {}",
+                    origin_files.len(),
+                    origin_cfg.id
+                );
+                files.extend(origin_files);
+            }
+        }
 
         let mut builder = TreeBuilder::new();
         for file in &files {
@@ -213,19 +276,19 @@ fn run_mount(
         Ok::<_, anyhow::Error>((tree, reader))
     })?;
 
-    check_stale_mount(&mountpoint)?;
+    check_stale_mount(&config.mount_point)?;
 
-    let lock_path = cache_dir.join("musicfs.lock");
+    let lock_path = config.cache_dir.join("musicfs.lock");
     let _lock = try_acquire_lock(&lock_path)
         .context("Failed to acquire lock — is another instance running?")?;
     info!(lock_path = ?lock_path, "Lock acquired");
 
     let fs = MusicFs::with_reader(tree, reader, handle.clone());
 
-    info!("Mounting filesystem at {:?}", mountpoint);
+    info!("Mounting filesystem at {:?}", config.mount_point);
 
     let session = fs
-        .spawn_mount(&mountpoint)
+        .spawn_mount(&config.mount_point)
         .context("Failed to mount filesystem")?;
 
     #[cfg(target_os = "linux")]

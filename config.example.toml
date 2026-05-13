@@ -1,0 +1,25 @@
+mount_point = "/mnt/music"
+cache_dir = "/var/cache/musicfs"
+
+[[origins]]
+id = "local-storage"
+origin_type = "local"
+priority = 1
+enabled = true
+path = "/path/to/local/music"
+
+[cache]
+metadata_cache_mb = 100
+content_cache_gb = 10
+
+[health]
+check_interval_secs = 30
+timeout_ms = 5000
+unhealthy_threshold = 3
+
+[logging]
+log_dir = "/var/log/musicfs"
+json_output = false
+journald = true
+level = "musicfs=info,warn"
+trace_sample_rate = 1.0

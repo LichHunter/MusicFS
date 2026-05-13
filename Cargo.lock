@@ -1940,6 +1940,7 @@ dependencies = [
  "sd-notify",
  "tokio",
  "tokio-util 0.7.18",
+ "toml",
  "tracing",
  "tracing-appender",
  "tracing-journald",

@@ -63,6 +63,7 @@
 
         clang
         lld
+        crates-lsp
 
         protobuf
         grpcurl
