@@ -101,53 +101,17 @@ cargo build --release
 
 ---
 
-## Architecture Essentials
+## Architecture
 
-### Crate Dependency Graph
+**Read the full design**: [`docs/v2/architecture.md`](docs/v2/architecture.md) — this is the source of truth for all architectural decisions, component design, data schemas, API definitions, and diagrams.
 
-```
-                    musicfs-cli
-                         │
-              ┌──────────┼──────────┐
-              │          │          │
-              ▼          ▼          ▼
-        musicfs-grpc  musicfs-fuse  musicfs-search
-              │          │               │
-              └────┬─────┴───────────────┘
-                   │
-                   ▼
-             musicfs-core
-              /    |    \
-             /     |     \
-            ▼      ▼      ▼
-    musicfs-cache  musicfs-origins  musicfs-metadata
-         │              │
-         ▼              │
-    musicfs-cas ◄───────┘
-         │
-         ▼
-    musicfs-sync
-```
+**Quick orientation** — MusicFS is a workspace of 11 crates. The dependency flow is:
 
-### Core Concepts
+`musicfs-cli` → `musicfs-fuse` / `musicfs-grpc` / `musicfs-search` → `musicfs-core` → `musicfs-cache` / `musicfs-origins` / `musicfs-metadata` → `musicfs-cas` → `musicfs-sync`
 
-| Concept | What | Where |
-|---------|------|-------|
-| **Virtual Tree** | In-memory directory structure from metadata | `musicfs-cache/src/tree.rs` |
-| **CAS** | Content-addressable chunk storage (xxHash64 + sled index) | `musicfs-cas/src/store.rs` |
-| **Origins** | Storage backends with failover + health monitoring | `musicfs-origins/src/` |
-| **CDC** | Content-defined chunking for delta sync (FastCDC) | `musicfs-sync/src/cdc.rs` |
-| **Event Bus** | `tokio::broadcast` for cross-component notifications | `musicfs-core/src/events.rs` |
+Key concepts: Virtual Tree (in-memory directory structure from metadata), CAS (content-addressable chunk storage with sled index), Origin Federation (multi-backend with failover and health monitoring), CDC (content-defined chunking for delta sync), Event Bus (tokio broadcast for cross-component notifications).
 
-### Performance Targets (from requirements.md)
-
-| Operation | Target | Max |
-|-----------|--------|-----|
-| Mount | <100ms | 500ms |
-| `stat()` cached | <1ms | 5ms |
-| `readdir()` cached | <10ms | 50ms |
-| `read()` cached | <1ms | 5ms |
-| Search (1M files) | <500ms | 1s |
+For performance targets, scalability requirements, and quantitative constraints, see [`docs/v2/requirements.md`](docs/v2/requirements.md).
 
 ---
 
@@ -237,6 +201,19 @@ BlueDoc additionally requires: Authors, Reviewers, Approvers.
 - **Cross-references**: Relative markdown links (`[architecture](../architecture.md)`)
 - **Requirement tracing**: Reference FR-X.Y / NFR-X.Y from requirements.md
 - **Diagrams**: PlantUML or Mermaid (architecture.md uses PlantUML)
+
+### Post-Task Documentation Check (MANDATORY)
+
+After completing any non-trivial task, check whether documentation needs updating:
+
+1. **Did the architecture change?** (new component, changed data flow, new dependency) → Update `docs/v2/architecture.md`
+2. **Did requirements change?** (new constraint, relaxed target, dropped feature) → Update `docs/v2/requirements.md`
+3. **Did the API change?** (new RPC, changed message, removed endpoint) → Update `proto/musicfs.proto` + `docs/api/`
+4. **Did build/tooling change?** (new dependency, changed Nix flake, new cargo feature) → Update this `AGENTS.md`
+5. **Did a plan get completed or invalidated?** → Update the plan's **Status** field (Draft → Shipped / Obsolete)
+6. **Did the config format change?** → Update `dist/config.example.toml`
+
+If documentation is out of date, **fix it in the same commit** as the code change. Do not leave it for later.
 
 ### File Naming
 
