@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use musicfs_cache::{Database, RenameError, TrashedFilter, TreeBuilder, VirtualTree};
+use musicfs_cache::{
+    Database, FlacHandler, FormatHandlerRegistry, FormatLayout, Id3v2Handler, RenameError,
+    TrashedFilter, TreeBuilder, VirtualTree,
+};
 use musicfs_cas::{CasConfig, CasStore, ContentFetcher, FileReader};
 use musicfs_core::{FileId, FileMeta, LoggingConfig, OriginId, RealPath, VirtualPath};
 use musicfs_fuse::MusicFs;
@@ -9,7 +12,7 @@ use musicfs_origins::{LocalOrigin, Origin};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::Write;
+use std::io::{Read as _, Write};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -267,6 +270,12 @@ fn run_mount(config: musicfs_core::Config) -> Result<()> {
         let fetcher = Arc::new(ContentFetcher::new(store.clone()));
         let mut files = Vec::new();
 
+        let mut format_registry = FormatHandlerRegistry::new();
+        format_registry.register(Arc::new(Id3v2Handler::new()));
+        format_registry.register(Arc::new(FlacHandler::new()));
+        let format_registry = Arc::new(format_registry);
+        info!("Format handler registry initialized (MP3, FLAC)");
+
         for origin_cfg in &config.origins {
             if !origin_cfg.enabled {
                 continue;
@@ -302,7 +311,9 @@ fn run_mount(config: musicfs_core::Config) -> Result<()> {
                     .unwrap();
                 let origin_path = PathBuf::from(path_str);
                 info!("Scanning music files for origin {}...", origin_cfg.id);
-                let origin_files = scan_music_files(&origin_path, &origin_id, db.as_ref()).await?;
+                let origin_files =
+                    scan_music_files(&origin_path, &origin_id, db.as_ref(), &format_registry)
+                        .await?;
                 info!(
                     "Found {} music files for origin {}",
                     origin_files.len(),
@@ -789,6 +800,7 @@ async fn scan_music_files(
     dir: &Path,
     origin_id: &OriginId,
     db: &Database,
+    format_registry: &Arc<FormatHandlerRegistry>,
 ) -> Result<Vec<FileMeta>> {
     let parser = MetadataParser::new();
     let mut files = Vec::new();
@@ -800,6 +812,7 @@ async fn scan_music_files(
         origin_id,
         &parser,
         db,
+        format_registry,
         &mut files,
         &mut file_id_counter,
     )
@@ -814,6 +827,7 @@ async fn scan_dir_recursive(
     origin_id: &OriginId,
     parser: &MetadataParser,
     db: &Database,
+    format_registry: &Arc<FormatHandlerRegistry>,
     files: &mut Vec<FileMeta>,
     id_counter: &mut i64,
 ) -> Result<()> {
@@ -825,7 +839,14 @@ async fn scan_dir_recursive(
 
         if metadata.is_dir() {
             Box::pin(scan_dir_recursive(
-                base, &path, origin_id, parser, db, files, id_counter,
+                base,
+                &path,
+                origin_id,
+                parser,
+                db,
+                format_registry,
+                files,
+                id_counter,
             ))
             .await?;
         } else if is_audio_file(&path) {
@@ -853,14 +874,18 @@ async fn scan_dir_recursive(
                 path: real_path_for_db.clone(),
             };
 
+            let format_layout = analyze_format_layout(&path, metadata.len(), format_registry);
+
             let file_id = db
-                .upsert_file(
+                .upsert_file_with_layout(
                     origin_id,
                     &real_path.path,
                     &virtual_path,
                     audio_meta.as_ref().unwrap_or(&Default::default()),
                     metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
                     metadata.len(),
+                    format_layout.as_ref(),
+                    None,
                 )
                 .unwrap_or_else(|e| {
                     debug!("Failed to upsert file to DB: {}", e);
@@ -897,6 +922,48 @@ fn is_audio_file(path: &Path) -> bool {
             .as_deref(),
         Some("flac" | "mp3" | "ogg" | "wav" | "m4a" | "aac" | "opus")
     )
+}
+
+const HEADER_READ_SIZE: usize = 65536;
+
+fn analyze_format_layout(
+    path: &Path,
+    file_size: u64,
+    registry: &FormatHandlerRegistry,
+) -> Option<FormatLayout> {
+    let ext = path.extension().and_then(|e| e.to_str())?;
+    let handler = registry.get_by_extension(&ext.to_lowercase())?;
+
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            warn!("Failed to open file for format analysis {:?}: {}", path, e);
+            return None;
+        }
+    };
+
+    let mut buffer = vec![0u8; HEADER_READ_SIZE.min(file_size as usize)];
+    if let Err(e) = file.read_exact(&mut buffer) {
+        warn!(
+            "Failed to read header for format analysis {:?}: {}",
+            path, e
+        );
+        return None;
+    }
+
+    match handler.analyze(&buffer, file_size) {
+        Ok(layout) => {
+            debug!(
+                "Format layout analyzed for {:?}: audio_start={}, audio_end={}",
+                path, layout.audio_start, layout.audio_end
+            );
+            Some(layout)
+        }
+        Err(e) => {
+            debug!("Format analysis failed for {:?}: {}", path, e);
+            None
+        }
+    }
 }
 
 fn build_virtual_path(path: &Path, audio: Option<&musicfs_core::AudioMeta>) -> VirtualPath {
