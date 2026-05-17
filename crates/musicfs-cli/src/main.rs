@@ -1,5 +1,8 @@
+mod metadata;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use metadata::MetadataCommand;
 use musicfs_cache::{
     Database, FlacHandler, FormatHandlerRegistry, FormatLayout, Id3v2Handler, RenameError,
     TrashedFilter, TreeBuilder, VirtualTree,
@@ -76,6 +79,12 @@ enum Commands {
         cache_dir: Option<PathBuf>,
         #[command(subcommand)]
         command: TrashCommands,
+    },
+    Metadata {
+        #[arg(long, default_value = "http://[::1]:50051", help = "gRPC endpoint")]
+        endpoint: String,
+        #[command(subcommand)]
+        command: MetadataCommand,
     },
 }
 
@@ -238,7 +247,16 @@ fn main() -> Result<()> {
             init_basic_logging(&cli.log_level);
             run_trash(config, cache_dir, command)
         }
+        Commands::Metadata { endpoint, command } => {
+            init_basic_logging(&cli.log_level);
+            run_metadata(endpoint, command)
+        }
     }
+}
+
+fn run_metadata(endpoint: String, command: MetadataCommand) -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new().context("Failed to create Tokio runtime")?;
+    runtime.block_on(metadata::run_metadata(command, &endpoint))
 }
 
 fn run_mount(config: musicfs_core::Config) -> Result<()> {
