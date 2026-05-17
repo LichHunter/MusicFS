@@ -203,6 +203,7 @@ impl Database {
                         bitrate: row.get(13)?,
                         sample_rate: row.get(14)?,
                         format,
+                        ..Default::default()
                     }),
                     size: row.get::<_, i64>(17)? as u64,
                     mtime: UNIX_EPOCH + Duration::from_secs(row.get::<_, i64>(16)? as u64),

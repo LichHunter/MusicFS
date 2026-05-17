@@ -50,6 +50,7 @@ pub fn make_audio_meta(artist: &str, album: &str, title: &str) -> AudioMeta {
         bitrate: Some(320),
         sample_rate: Some(44100),
         format: AudioFormat::Flac,
+        ..Default::default()
     }
 }
 

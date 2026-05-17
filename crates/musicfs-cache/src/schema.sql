@@ -20,6 +20,32 @@ CREATE TABLE IF NOT EXISTS files (
     bitrate         INTEGER,
     sample_rate     INTEGER,
     format          TEXT,
+    track_total     INTEGER,
+    disc_total      INTEGER,
+    date            TEXT,
+    composer        TEXT,
+    comment         TEXT,
+    lyrics          TEXT,
+    copyright       TEXT,
+    compilation     INTEGER,
+    artist_sort     TEXT,
+    album_artist_sort TEXT,
+    album_sort      TEXT,
+    title_sort      TEXT,
+    mb_recording_id TEXT,
+    mb_album_id     TEXT,
+    mb_artist_id    TEXT,
+    mb_album_artist_id TEXT,
+    mb_release_group_id TEXT,
+    replaygain_track_gain REAL,
+    replaygain_track_peak REAL,
+    replaygain_album_gain REAL,
+    replaygain_album_peak REAL,
+    channels        INTEGER,
+    bits_per_sample INTEGER,
+    encoder         TEXT,
+    custom_tags     TEXT,
+    format_layout   BLOB,
     
     origin_mtime    INTEGER NOT NULL,
     origin_size     INTEGER NOT NULL,
@@ -59,6 +85,11 @@ CREATE INDEX IF NOT EXISTS idx_files_content_hash ON files(content_hash);
 CREATE INDEX IF NOT EXISTS idx_files_real ON files(origin_id, real_path);
 CREATE INDEX IF NOT EXISTS idx_files_origin ON files(origin_id);
 CREATE INDEX IF NOT EXISTS idx_files_last_sync ON files(last_sync);
+CREATE INDEX IF NOT EXISTS idx_files_mb_album ON files(mb_album_id);
+CREATE INDEX IF NOT EXISTS idx_files_mb_artist ON files(mb_artist_id);
+CREATE INDEX IF NOT EXISTS idx_files_genre ON files(genre);
+CREATE INDEX IF NOT EXISTS idx_files_year ON files(year);
+CREATE INDEX IF NOT EXISTS idx_files_composer ON files(composer);
 CREATE INDEX IF NOT EXISTS idx_artwork_file ON artwork(file_id);
 
 CREATE TABLE IF NOT EXISTS directories (
