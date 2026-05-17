@@ -6,10 +6,13 @@ pub mod proto {
     }
 }
 
+mod metadata;
 mod search_service;
 mod server;
 mod webhook;
 
+pub use metadata::MetadataServiceImpl;
+pub use proto::musicfs::v1::metadata_service_server::MetadataServiceServer;
 pub use proto::musicfs::v1::music_fs_server::{MusicFs, MusicFsServer as MusicFsGrpcServer};
 pub use proto::musicfs::v1::*;
 pub use search_service::SearchService;
