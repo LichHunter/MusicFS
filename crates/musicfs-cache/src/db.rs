@@ -284,6 +284,146 @@ impl Database {
         .optional()
         .map_err(|e| Error::Database(format!("query mtime failed: {}", e)))
     }
+
+    pub fn path_exists(&self, path: &VirtualPath) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE virtual_path = ?1",
+                params![path.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(|e| Error::Database(format!("path_exists query failed: {}", e)))?;
+        Ok(count > 0)
+    }
+
+    pub fn update_virtual_path(&self, id: FileId, new_path: &VirtualPath) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn
+            .execute(
+                "UPDATE files SET virtual_path = ?1 WHERE id = ?2",
+                params![new_path.as_str(), id.0],
+            )
+            .map_err(|e| Error::Database(format!("update_virtual_path failed: {}", e)))?;
+
+        if rows == 0 {
+            return Err(Error::FileNotFound(format!("file id {} not found", id.0)));
+        }
+        debug!(
+            id = id.0,
+            new_path = new_path.as_str(),
+            "updated virtual path"
+        );
+        Ok(())
+    }
+
+    pub fn rename_directory(&self, old_prefix: &str, new_prefix: &str) -> Result<u64> {
+        let conn = self.conn.lock().unwrap();
+
+        let pattern = format!("{}%", old_prefix);
+        let old_len = old_prefix.len();
+
+        let rows = conn
+            .execute(
+                "UPDATE files SET virtual_path = ?1 || substr(virtual_path, ?2) WHERE virtual_path LIKE ?3",
+                params![new_prefix, old_len as i64 + 1, pattern],
+            )
+            .map_err(|e| Error::Database(format!("rename_directory failed: {}", e)))?;
+
+        debug!(old_prefix, new_prefix, rows, "renamed directory paths");
+        Ok(rows as u64)
+    }
+
+    pub fn get_files_by_prefix(&self, prefix: &str) -> Result<Vec<(FileId, VirtualPath)>> {
+        let conn = self.conn.lock().unwrap();
+        let pattern = format!("{}%", prefix);
+
+        let mut stmt = conn
+            .prepare("SELECT id, virtual_path FROM files WHERE virtual_path LIKE ?1")
+            .map_err(|e| Error::Database(format!("prepare failed: {}", e)))?;
+
+        let files: Vec<(FileId, VirtualPath)> = stmt
+            .query_map(params![pattern], |row| {
+                Ok((
+                    FileId(row.get(0)?),
+                    VirtualPath::new(row.get::<_, String>(1)?),
+                ))
+            })
+            .map_err(|e| Error::Database(format!("query failed: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(files)
+    }
+
+    pub fn insert_directory(&self, path: &VirtualPath) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO directories (path) VALUES (?1)",
+            params![path.as_str()],
+        )
+        .map_err(|e| Error::Database(format!("insert_directory failed: {}", e)))?;
+        debug!(path = path.as_str(), "inserted directory");
+        Ok(())
+    }
+
+    pub fn delete_directory(&self, path: &VirtualPath) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM directories WHERE path = ?1",
+            params![path.as_str()],
+        )
+        .map_err(|e| Error::Database(format!("delete_directory failed: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn rename_directories(&self, old_prefix: &str, new_prefix: &str) -> Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        let pattern = format!("{}%", old_prefix);
+        let old_len = old_prefix.len();
+
+        let rows = conn
+            .execute(
+                "UPDATE directories SET path = ?1 || substr(path, ?2) WHERE path LIKE ?3",
+                params![new_prefix, old_len as i64 + 1, pattern],
+            )
+            .map_err(|e| Error::Database(format!("rename_directories failed: {}", e)))?;
+
+        debug!(old_prefix, new_prefix, rows, "renamed directory paths");
+        Ok(rows as u64)
+    }
+
+    pub fn list_directories(&self) -> Result<Vec<VirtualPath>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut stmt = conn
+            .prepare("SELECT path FROM directories ORDER BY path")
+            .map_err(|e| Error::Database(format!("prepare failed: {}", e)))?;
+
+        let dirs: Vec<VirtualPath> = stmt
+            .query_map([], |row| Ok(VirtualPath::new(row.get::<_, String>(0)?)))
+            .map_err(|e| Error::Database(format!("query failed: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(dirs)
+    }
+
+    pub fn get_file_by_real_path(
+        &self,
+        origin_id: &OriginId,
+        real_path: &Path,
+    ) -> Result<Option<VirtualPath>> {
+        let conn = self.conn.lock().unwrap();
+
+        conn.query_row(
+            "SELECT virtual_path FROM files WHERE origin_id = ?1 AND real_path = ?2",
+            params![&origin_id.0, real_path.to_string_lossy()],
+            |row| Ok(VirtualPath::new(row.get::<_, String>(0)?)),
+        )
+        .optional()
+        .map_err(|e| Error::Database(format!("query failed: {}", e)))
+    }
 }
 
 fn parse_audio_format(s: &str) -> AudioFormat {
@@ -500,5 +640,146 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(retrieved.content_hash.is_some());
+    }
+
+    #[test]
+    fn test_path_exists() {
+        let db = Database::open_memory().unwrap();
+
+        let path = VirtualPath::new("/Artist/Album/Track.flac");
+        assert!(!db.path_exists(&path).unwrap());
+
+        db.upsert_file(
+            &OriginId::from("local"),
+            Path::new("/test.flac"),
+            &path,
+            &AudioMeta::default(),
+            UNIX_EPOCH,
+            100,
+        )
+        .unwrap();
+
+        assert!(db.path_exists(&path).unwrap());
+        assert!(!db
+            .path_exists(&VirtualPath::new("/Other/Path.flac"))
+            .unwrap());
+    }
+
+    #[test]
+    fn test_update_virtual_path() {
+        let db = Database::open_memory().unwrap();
+
+        let old_path = VirtualPath::new("/Old/Path/Track.flac");
+        let new_path = VirtualPath::new("/New/Path/Track.flac");
+
+        let id = db
+            .upsert_file(
+                &OriginId::from("local"),
+                Path::new("/test.flac"),
+                &old_path,
+                &AudioMeta::default(),
+                UNIX_EPOCH,
+                100,
+            )
+            .unwrap();
+
+        db.update_virtual_path(id, &new_path).unwrap();
+
+        assert!(db.get_file_by_virtual_path(&old_path).unwrap().is_none());
+        assert!(db.get_file_by_virtual_path(&new_path).unwrap().is_some());
+    }
+
+    #[test]
+    fn test_rename_directory() {
+        let db = Database::open_memory().unwrap();
+        let origin = OriginId::from("local");
+
+        db.upsert_file(
+            &origin,
+            Path::new("/a.flac"),
+            &VirtualPath::new("/Artist/Album/Track1.flac"),
+            &AudioMeta::default(),
+            UNIX_EPOCH,
+            100,
+        )
+        .unwrap();
+
+        db.upsert_file(
+            &origin,
+            Path::new("/b.flac"),
+            &VirtualPath::new("/Artist/Album/Track2.flac"),
+            &AudioMeta::default(),
+            UNIX_EPOCH,
+            100,
+        )
+        .unwrap();
+
+        db.upsert_file(
+            &origin,
+            Path::new("/c.flac"),
+            &VirtualPath::new("/Other/Track.flac"),
+            &AudioMeta::default(),
+            UNIX_EPOCH,
+            100,
+        )
+        .unwrap();
+
+        let count = db.rename_directory("/Artist/", "/Renamed Artist/").unwrap();
+        assert_eq!(count, 2);
+
+        assert!(db
+            .path_exists(&VirtualPath::new("/Renamed Artist/Album/Track1.flac"))
+            .unwrap());
+        assert!(db
+            .path_exists(&VirtualPath::new("/Renamed Artist/Album/Track2.flac"))
+            .unwrap());
+        assert!(db
+            .path_exists(&VirtualPath::new("/Other/Track.flac"))
+            .unwrap());
+        assert!(!db
+            .path_exists(&VirtualPath::new("/Artist/Album/Track1.flac"))
+            .unwrap());
+    }
+
+    #[test]
+    fn test_get_files_by_prefix() {
+        let db = Database::open_memory().unwrap();
+        let origin = OriginId::from("local");
+
+        db.upsert_file(
+            &origin,
+            Path::new("/a.flac"),
+            &VirtualPath::new("/Artist/Album/Track1.flac"),
+            &AudioMeta::default(),
+            UNIX_EPOCH,
+            100,
+        )
+        .unwrap();
+
+        db.upsert_file(
+            &origin,
+            Path::new("/b.flac"),
+            &VirtualPath::new("/Artist/Album/Track2.flac"),
+            &AudioMeta::default(),
+            UNIX_EPOCH,
+            100,
+        )
+        .unwrap();
+
+        db.upsert_file(
+            &origin,
+            Path::new("/c.flac"),
+            &VirtualPath::new("/Other/Track.flac"),
+            &AudioMeta::default(),
+            UNIX_EPOCH,
+            100,
+        )
+        .unwrap();
+
+        let files = db.get_files_by_prefix("/Artist/").unwrap();
+        assert_eq!(files.len(), 2);
+
+        let files = db.get_files_by_prefix("/Other/").unwrap();
+        assert_eq!(files.len(), 1);
     }
 }

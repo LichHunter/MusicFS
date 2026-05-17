@@ -3,9 +3,9 @@ use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, ReplyOpen,
     Request,
 };
-use musicfs_cache::{VirtualNode, VirtualTree, ROOT_INODE};
+use musicfs_cache::{Database, RenameError, VirtualNode, VirtualTree, ROOT_INODE};
 use musicfs_cas::FileReader;
-use musicfs_core::Result;
+use musicfs_core::{Result, VirtualPath};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -22,6 +22,7 @@ const SEARCH_QUERY_INODE_BASE: u64 = 0xFFFF_FFFF_0000_0100;
 pub struct MusicFs {
     tree: Arc<RwLock<VirtualTree>>,
     reader: Option<Arc<FileReader>>,
+    db: Option<Arc<Database>>,
     runtime_handle: Handle,
     search_ops: Option<SearchOps>,
     query_inodes: RwLock<HashMap<String, u64>>,
@@ -36,6 +37,7 @@ impl MusicFs {
         Self {
             tree,
             reader: None,
+            db: None,
             runtime_handle,
             search_ops: None,
             query_inodes: RwLock::new(HashMap::new()),
@@ -54,6 +56,7 @@ impl MusicFs {
         Self {
             tree,
             reader: Some(reader),
+            db: None,
             runtime_handle,
             search_ops: None,
             query_inodes: RwLock::new(HashMap::new()),
@@ -64,9 +67,35 @@ impl MusicFs {
         }
     }
 
+    pub fn with_db(mut self, db: Arc<Database>) -> Self {
+        self.db = Some(db);
+        self
+    }
+
     pub fn with_search(mut self, search_ops: SearchOps) -> Self {
         self.search_ops = Some(search_ops);
         self
+    }
+
+    fn resolve_path(&self, parent_inode: u64, name: &OsStr) -> Option<VirtualPath> {
+        let tree = self.tree.read();
+        let parent_path = self.inode_to_path_inner(&tree, parent_inode)?;
+        let name_str = name.to_string_lossy();
+        let full_path = if parent_path == "/" {
+            format!("/{}", name_str)
+        } else {
+            format!("{}/{}", parent_path, name_str)
+        };
+        Some(VirtualPath::new(full_path))
+    }
+
+    fn inode_to_path_inner(&self, tree: &VirtualTree, inode: u64) -> Option<String> {
+        for (path, &ino) in tree.path_to_inode_iter() {
+            if ino == inode {
+                return Some(path.as_str().to_string());
+            }
+        }
+        None
     }
 
     fn get_or_create_query_inode(&self, query: &str) -> u64 {
@@ -99,7 +128,6 @@ impl MusicFs {
         info!("Mounting MusicFS at {:?}", mountpoint);
 
         let options = vec![
-            fuser::MountOption::RO,
             fuser::MountOption::FSName("musicfs".to_string()),
             fuser::MountOption::AutoUnmount,
             fuser::MountOption::AllowOther,
@@ -114,7 +142,6 @@ impl MusicFs {
         info!("Mounting MusicFS at {:?}", mountpoint);
 
         let options = vec![
-            fuser::MountOption::RO,
             fuser::MountOption::FSName("musicfs".to_string()),
             fuser::MountOption::AutoUnmount,
             fuser::MountOption::AllowOther,
@@ -471,13 +498,52 @@ impl Filesystem for MusicFs {
     fn mkdir(
         &mut self,
         _req: &Request,
-        _parent: u64,
-        _name: &OsStr,
+        parent: u64,
+        name: &OsStr,
         _mode: u32,
         _umask: u32,
         reply: ReplyEntry,
     ) {
-        reply.error(libc::EROFS);
+        let path = match self.resolve_path(parent, name) {
+            Some(p) => p,
+            None => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+        };
+
+        let mut tree = self.tree.write();
+        match tree.mkdir(&path) {
+            Ok(inode) => {
+                if let Some(ref db) = self.db {
+                    if let Err(e) = db.insert_directory(&path) {
+                        warn!(error = %e, "failed to persist directory to database");
+                    }
+                }
+                let attr = FileAttr {
+                    ino: inode,
+                    size: 0,
+                    blocks: 0,
+                    atime: SystemTime::now(),
+                    mtime: SystemTime::now(),
+                    ctime: SystemTime::now(),
+                    crtime: SystemTime::now(),
+                    kind: FileType::Directory,
+                    perm: 0o755,
+                    nlink: 2,
+                    uid: self.uid,
+                    gid: self.gid,
+                    rdev: 0,
+                    blksize: BLOCK_SIZE,
+                    flags: 0,
+                };
+                debug!(path = %path.as_str(), inode, "mkdir successful");
+                reply.entry(&TTL, &attr, 0);
+            }
+            Err(RenameError::TargetExists) => reply.error(libc::EEXIST),
+            Err(RenameError::ParentNotFound) => reply.error(libc::ENOENT),
+            Err(_) => reply.error(libc::EIO),
+        }
     }
 
     fn unlink(&mut self, _req: &Request, _parent: u64, _name: &OsStr, reply: fuser::ReplyEmpty) {
@@ -491,14 +557,100 @@ impl Filesystem for MusicFs {
     fn rename(
         &mut self,
         _req: &Request,
-        _parent: u64,
-        _name: &OsStr,
-        _newparent: u64,
-        _newname: &OsStr,
+        parent: u64,
+        name: &OsStr,
+        newparent: u64,
+        newname: &OsStr,
         _flags: u32,
         reply: fuser::ReplyEmpty,
     ) {
-        reply.error(libc::EROFS);
+        let old_path = match self.resolve_path(parent, name) {
+            Some(p) => p,
+            None => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+        };
+
+        let new_path = match self.resolve_path(newparent, newname) {
+            Some(p) => p,
+            None => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+        };
+
+        if old_path.as_str() == new_path.as_str() {
+            reply.ok();
+            return;
+        }
+
+        let is_dir = {
+            let tree = self.tree.read();
+            tree.get_by_path(&old_path)
+                .map(|n| n.is_dir())
+                .unwrap_or(false)
+        };
+
+        let result = if is_dir {
+            let mut tree = self.tree.write();
+            match tree.rename_directory(&old_path, &new_path) {
+                Ok(count) => {
+                    if let Some(ref db) = self.db {
+                        let old_prefix = if old_path.as_str().ends_with('/') {
+                            old_path.as_str().to_string()
+                        } else {
+                            format!("{}/", old_path.as_str())
+                        };
+                        let new_prefix = if new_path.as_str().ends_with('/') {
+                            new_path.as_str().to_string()
+                        } else {
+                            format!("{}/", new_path.as_str())
+                        };
+                        if let Err(e) = db.rename_directory(&old_prefix, &new_prefix) {
+                            warn!(error = %e, "failed to persist file path rename to database");
+                        }
+                        if let Err(e) = db.rename_directories(&old_prefix, &new_prefix) {
+                            warn!(error = %e, "failed to persist directory rename to database");
+                        }
+                    }
+                    debug!(old = %old_path.as_str(), new = %new_path.as_str(), count, "directory renamed");
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            let file_id = {
+                let tree = self.tree.read();
+                match tree.get_by_path(&old_path) {
+                    Some(VirtualNode::File(f)) => Some(f.file_id),
+                    _ => None,
+                }
+            };
+
+            let mut tree = self.tree.write();
+            match tree.rename_file(&old_path, &new_path) {
+                Ok(()) => {
+                    if let (Some(ref db), Some(id)) = (&self.db, file_id) {
+                        if let Err(e) = db.update_virtual_path(id, &new_path) {
+                            warn!(error = %e, "failed to persist file rename to database");
+                        }
+                    }
+                    debug!(old = %old_path.as_str(), new = %new_path.as_str(), "file renamed");
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        };
+
+        match result {
+            Ok(()) => reply.ok(),
+            Err(RenameError::SourceNotFound) => reply.error(libc::ENOENT),
+            Err(RenameError::TargetExists) => reply.error(libc::EEXIST),
+            Err(RenameError::ParentNotFound) => reply.error(libc::ENOENT),
+            Err(RenameError::IsDirectory) => reply.error(libc::EISDIR),
+            Err(RenameError::NotDirectory) => reply.error(libc::ENOTDIR),
+        }
     }
 
     fn create(

@@ -56,3 +56,11 @@ CREATE INDEX IF NOT EXISTS idx_files_real ON files(origin_id, real_path);
 CREATE INDEX IF NOT EXISTS idx_files_origin ON files(origin_id);
 CREATE INDEX IF NOT EXISTS idx_files_last_sync ON files(last_sync);
 CREATE INDEX IF NOT EXISTS idx_artwork_file ON artwork(file_id);
+
+CREATE TABLE IF NOT EXISTS directories (
+    id          INTEGER PRIMARY KEY,
+    path        TEXT NOT NULL UNIQUE,
+    created_at  INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_directories_path ON directories(path);

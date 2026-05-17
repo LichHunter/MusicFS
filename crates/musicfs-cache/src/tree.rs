@@ -310,6 +310,276 @@ impl VirtualTree {
     pub fn refresh_policy(&self) -> &RefreshPolicy {
         &self.refresh_policy
     }
+
+    pub fn path_to_inode_iter(&self) -> impl Iterator<Item = (&VirtualPath, &Inode)> {
+        self.path_to_inode.iter()
+    }
+
+    pub fn mkdir(&mut self, path: &VirtualPath) -> std::result::Result<Inode, RenameError> {
+        if self.path_to_inode.contains_key(path) {
+            return Err(RenameError::TargetExists);
+        }
+
+        let parent_path = std::path::Path::new(path.as_str())
+            .parent()
+            .map(|p| {
+                let s = p.to_string_lossy();
+                if s.is_empty() {
+                    VirtualPath::new("/")
+                } else {
+                    VirtualPath::new(s.into_owned())
+                }
+            })
+            .unwrap_or_else(|| VirtualPath::new("/"));
+
+        let parent_inode = self
+            .path_to_inode
+            .get(&parent_path)
+            .copied()
+            .ok_or(RenameError::ParentNotFound)?;
+
+        if !self
+            .nodes
+            .get(&parent_inode)
+            .map(|n| n.is_dir())
+            .unwrap_or(false)
+        {
+            return Err(RenameError::ParentNotFound);
+        }
+
+        let inode = self.alloc_inode();
+        let name = std::path::Path::new(path.as_str())
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_default();
+
+        let dir_node = DirNode {
+            inode,
+            parent: parent_inode,
+            name: name.clone(),
+            children: BTreeMap::new(),
+            mtime: SystemTime::now(),
+        };
+
+        self.nodes.insert(inode, VirtualNode::Directory(dir_node));
+        self.path_to_inode.insert(path.clone(), inode);
+
+        if let Some(VirtualNode::Directory(parent)) = self.nodes.get_mut(&parent_inode) {
+            parent.children.insert(name, inode);
+        }
+
+        debug!(path = path.as_str(), inode, "created directory");
+        Ok(inode)
+    }
+
+    pub fn rename_file(
+        &mut self,
+        old_path: &VirtualPath,
+        new_path: &VirtualPath,
+    ) -> std::result::Result<(), RenameError> {
+        let old_inode = self
+            .path_to_inode
+            .get(old_path)
+            .copied()
+            .ok_or(RenameError::SourceNotFound)?;
+
+        if self.path_to_inode.contains_key(new_path) {
+            return Err(RenameError::TargetExists);
+        }
+
+        let node = self
+            .nodes
+            .get(&old_inode)
+            .ok_or(RenameError::SourceNotFound)?;
+
+        if node.is_dir() {
+            return Err(RenameError::IsDirectory);
+        }
+
+        let new_parent_path = std::path::Path::new(new_path.as_str())
+            .parent()
+            .map(|p| {
+                let s = p.to_string_lossy();
+                if s.is_empty() {
+                    VirtualPath::new("/")
+                } else {
+                    VirtualPath::new(s.into_owned())
+                }
+            })
+            .unwrap_or_else(|| VirtualPath::new("/"));
+
+        let new_parent_inode = self
+            .path_to_inode
+            .get(&new_parent_path)
+            .copied()
+            .ok_or(RenameError::ParentNotFound)?;
+
+        if !self
+            .nodes
+            .get(&new_parent_inode)
+            .map(|n| n.is_dir())
+            .unwrap_or(false)
+        {
+            return Err(RenameError::ParentNotFound);
+        }
+
+        self.path_to_inode.remove(old_path);
+
+        let old_parent_path = std::path::Path::new(old_path.as_str())
+            .parent()
+            .map(|p| VirtualPath::new(p.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| VirtualPath::new("/"));
+
+        if let Some(&old_parent_inode) = self.path_to_inode.get(&old_parent_path) {
+            if let Some(VirtualNode::Directory(dir)) = self.nodes.get_mut(&old_parent_inode) {
+                let old_name = std::path::Path::new(old_path.as_str())
+                    .file_name()
+                    .map(|n| n.to_os_string())
+                    .unwrap_or_default();
+                dir.children.remove(&old_name);
+            }
+        }
+
+        let new_name = std::path::Path::new(new_path.as_str())
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_default();
+
+        if let Some(VirtualNode::File(file)) = self.nodes.get_mut(&old_inode) {
+            file.name = new_name.clone();
+        }
+
+        if let Some(VirtualNode::Directory(dir)) = self.nodes.get_mut(&new_parent_inode) {
+            dir.children.insert(new_name, old_inode);
+        }
+
+        self.path_to_inode.insert(new_path.clone(), old_inode);
+
+        debug!(
+            old = old_path.as_str(),
+            new = new_path.as_str(),
+            inode = old_inode,
+            "renamed file"
+        );
+        Ok(())
+    }
+
+    pub fn rename_directory(
+        &mut self,
+        old_path: &VirtualPath,
+        new_path: &VirtualPath,
+    ) -> std::result::Result<u64, RenameError> {
+        let old_inode = self
+            .path_to_inode
+            .get(old_path)
+            .copied()
+            .ok_or(RenameError::SourceNotFound)?;
+
+        if !self
+            .nodes
+            .get(&old_inode)
+            .map(|n| n.is_dir())
+            .unwrap_or(false)
+        {
+            return Err(RenameError::NotDirectory);
+        }
+
+        if self.path_to_inode.contains_key(new_path) {
+            return Err(RenameError::TargetExists);
+        }
+
+        let new_parent_path = std::path::Path::new(new_path.as_str())
+            .parent()
+            .map(|p| {
+                let s = p.to_string_lossy();
+                if s.is_empty() {
+                    VirtualPath::new("/")
+                } else {
+                    VirtualPath::new(s.into_owned())
+                }
+            })
+            .unwrap_or_else(|| VirtualPath::new("/"));
+
+        let new_parent_inode = self
+            .path_to_inode
+            .get(&new_parent_path)
+            .copied()
+            .ok_or(RenameError::ParentNotFound)?;
+
+        if !self
+            .nodes
+            .get(&new_parent_inode)
+            .map(|n| n.is_dir())
+            .unwrap_or(false)
+        {
+            return Err(RenameError::ParentNotFound);
+        }
+
+        let old_prefix = old_path.as_str();
+        let new_prefix = new_path.as_str();
+
+        let paths_to_update: Vec<(VirtualPath, Inode)> = self
+            .path_to_inode
+            .iter()
+            .filter(|(p, _)| p.as_str().starts_with(old_prefix))
+            .map(|(p, &i)| (p.clone(), i))
+            .collect();
+
+        let count = paths_to_update.len() as u64;
+
+        for (old_p, inode) in paths_to_update {
+            self.path_to_inode.remove(&old_p);
+            let new_p_str = format!("{}{}", new_prefix, &old_p.as_str()[old_prefix.len()..]);
+            let new_p = VirtualPath::new(&new_p_str);
+            self.path_to_inode.insert(new_p, inode);
+        }
+
+        let old_parent_path = std::path::Path::new(old_path.as_str())
+            .parent()
+            .map(|p| VirtualPath::new(p.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| VirtualPath::new("/"));
+
+        if let Some(&old_parent_inode) = self.path_to_inode.get(&old_parent_path) {
+            if let Some(VirtualNode::Directory(dir)) = self.nodes.get_mut(&old_parent_inode) {
+                let old_name = std::path::Path::new(old_path.as_str())
+                    .file_name()
+                    .map(|n| n.to_os_string())
+                    .unwrap_or_default();
+                dir.children.remove(&old_name);
+            }
+        }
+
+        let new_name = std::path::Path::new(new_path.as_str())
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_default();
+
+        if let Some(VirtualNode::Directory(dir)) = self.nodes.get_mut(&old_inode) {
+            dir.name = new_name.clone();
+            dir.parent = new_parent_inode;
+        }
+
+        if let Some(VirtualNode::Directory(dir)) = self.nodes.get_mut(&new_parent_inode) {
+            dir.children.insert(new_name, old_inode);
+        }
+
+        debug!(
+            old = old_path.as_str(),
+            new = new_path.as_str(),
+            count,
+            "renamed directory"
+        );
+        Ok(count)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenameError {
+    SourceNotFound,
+    TargetExists,
+    ParentNotFound,
+    IsDirectory,
+    NotDirectory,
 }
 
 impl Default for VirtualTree {
@@ -444,5 +714,179 @@ mod tests {
 
         let tree = builder.build();
         assert_eq!(tree.file_count(), 2);
+    }
+
+    #[test]
+    fn test_rename_file() {
+        let mut tree = VirtualTree::new();
+        let old_path = VirtualPath::new("/Artist/Album/Track.flac");
+        let new_path = VirtualPath::new("/Artist/Album/Renamed.flac");
+
+        tree.insert_file(&make_file_meta(1, old_path.as_str()));
+
+        assert!(tree.get_by_path(&old_path).is_some());
+
+        tree.rename_file(&old_path, &new_path).unwrap();
+
+        assert!(tree.get_by_path(&old_path).is_none());
+        assert!(tree.get_by_path(&new_path).is_some());
+    }
+
+    #[test]
+    fn test_rename_file_to_new_dir() {
+        let mut tree = VirtualTree::new();
+        tree.insert_file(&make_file_meta(1, "/Artist/Album/Track.flac"));
+
+        tree.mkdir(&VirtualPath::new("/New Artist")).unwrap();
+        tree.mkdir(&VirtualPath::new("/New Artist/New Album"))
+            .unwrap();
+
+        let result = tree.rename_file(
+            &VirtualPath::new("/Artist/Album/Track.flac"),
+            &VirtualPath::new("/New Artist/New Album/Track.flac"),
+        );
+
+        assert!(result.is_ok());
+        assert!(tree
+            .get_by_path(&VirtualPath::new("/New Artist/New Album/Track.flac"))
+            .is_some());
+    }
+
+    #[test]
+    fn test_rename_file_parent_not_found() {
+        let mut tree = VirtualTree::new();
+        tree.insert_file(&make_file_meta(1, "/Artist/Album/Track.flac"));
+
+        let result = tree.rename_file(
+            &VirtualPath::new("/Artist/Album/Track.flac"),
+            &VirtualPath::new("/NonExistent/Album/Track.flac"),
+        );
+
+        assert_eq!(result, Err(RenameError::ParentNotFound));
+    }
+
+    #[test]
+    fn test_rename_file_target_exists() {
+        let mut tree = VirtualTree::new();
+        tree.insert_file(&make_file_meta(1, "/A/Track1.flac"));
+        tree.insert_file(&make_file_meta(2, "/A/Track2.flac"));
+
+        let result = tree.rename_file(
+            &VirtualPath::new("/A/Track1.flac"),
+            &VirtualPath::new("/A/Track2.flac"),
+        );
+
+        assert_eq!(result, Err(RenameError::TargetExists));
+    }
+
+    #[test]
+    fn test_rename_file_source_not_found() {
+        let mut tree = VirtualTree::new();
+
+        let result = tree.rename_file(
+            &VirtualPath::new("/Nonexistent.flac"),
+            &VirtualPath::new("/New.flac"),
+        );
+
+        assert_eq!(result, Err(RenameError::SourceNotFound));
+    }
+
+    #[test]
+    fn test_rename_directory() {
+        let mut tree = VirtualTree::new();
+        tree.insert_file(&make_file_meta(1, "/Artist/Album/Track1.flac"));
+        tree.insert_file(&make_file_meta(2, "/Artist/Album/Track2.flac"));
+        tree.insert_file(&make_file_meta(3, "/Artist/Other/Track3.flac"));
+
+        let count = tree
+            .rename_directory(
+                &VirtualPath::new("/Artist"),
+                &VirtualPath::new("/Renamed Artist"),
+            )
+            .unwrap();
+
+        assert_eq!(count, 6);
+
+        assert!(tree.get_by_path(&VirtualPath::new("/Artist")).is_none());
+        assert!(tree
+            .get_by_path(&VirtualPath::new("/Renamed Artist"))
+            .is_some());
+        assert!(tree
+            .get_by_path(&VirtualPath::new("/Renamed Artist/Album/Track1.flac"))
+            .is_some());
+        assert!(tree
+            .get_by_path(&VirtualPath::new("/Renamed Artist/Album/Track2.flac"))
+            .is_some());
+        assert!(tree
+            .get_by_path(&VirtualPath::new("/Renamed Artist/Other/Track3.flac"))
+            .is_some());
+    }
+
+    #[test]
+    fn test_rename_directory_parent_not_found() {
+        let mut tree = VirtualTree::new();
+        tree.insert_file(&make_file_meta(1, "/Artist/Album/Track.flac"));
+
+        let result = tree.rename_directory(
+            &VirtualPath::new("/Artist"),
+            &VirtualPath::new("/NonExistent/Renamed"),
+        );
+
+        assert_eq!(result, Err(RenameError::ParentNotFound));
+    }
+
+    #[test]
+    fn test_rename_directory_not_directory() {
+        let mut tree = VirtualTree::new();
+        tree.insert_file(&make_file_meta(1, "/Artist/Track.flac"));
+
+        let result = tree.rename_directory(
+            &VirtualPath::new("/Artist/Track.flac"),
+            &VirtualPath::new("/New"),
+        );
+
+        assert_eq!(result, Err(RenameError::NotDirectory));
+    }
+
+    #[test]
+    fn test_mkdir() {
+        let mut tree = VirtualTree::new();
+
+        let inode = tree.mkdir(&VirtualPath::new("/NewDir")).unwrap();
+        assert!(inode > ROOT_INODE);
+        assert!(tree.get_by_path(&VirtualPath::new("/NewDir")).is_some());
+        assert!(tree
+            .get_by_path(&VirtualPath::new("/NewDir"))
+            .unwrap()
+            .is_dir());
+    }
+
+    #[test]
+    fn test_mkdir_nested() {
+        let mut tree = VirtualTree::new();
+
+        tree.mkdir(&VirtualPath::new("/A")).unwrap();
+        tree.mkdir(&VirtualPath::new("/A/B")).unwrap();
+        tree.mkdir(&VirtualPath::new("/A/B/C")).unwrap();
+
+        assert!(tree.get_by_path(&VirtualPath::new("/A/B/C")).is_some());
+    }
+
+    #[test]
+    fn test_mkdir_parent_not_found() {
+        let mut tree = VirtualTree::new();
+
+        let result = tree.mkdir(&VirtualPath::new("/A/B/C"));
+        assert_eq!(result, Err(RenameError::ParentNotFound));
+    }
+
+    #[test]
+    fn test_mkdir_already_exists() {
+        let mut tree = VirtualTree::new();
+
+        tree.mkdir(&VirtualPath::new("/Existing")).unwrap();
+        let result = tree.mkdir(&VirtualPath::new("/Existing"));
+
+        assert_eq!(result, Err(RenameError::TargetExists));
     }
 }

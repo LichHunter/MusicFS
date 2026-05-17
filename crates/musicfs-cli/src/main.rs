@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use musicfs_cache::TreeBuilder;
+use musicfs_cache::{Database, TreeBuilder};
 use musicfs_cas::{CasConfig, CasStore, ContentFetcher, FileReader};
 use musicfs_core::{FileId, FileMeta, LoggingConfig, OriginId, RealPath, VirtualPath};
 use musicfs_fuse::MusicFs;
@@ -202,12 +202,16 @@ fn run_mount(config: musicfs_core::Config) -> Result<()> {
     let runtime = tokio::runtime::Runtime::new().context("Failed to create Tokio runtime")?;
     let handle = runtime.handle().clone();
 
-    let (tree, reader) = runtime.block_on(async {
+    let (tree, reader, db) = runtime.block_on(async {
         info!(mountpoint = ?config.mount_point, "Mount configuration");
         info!("Cache directory: {:?}", config.cache_dir);
 
         std::fs::create_dir_all(&config.cache_dir).context("Failed to create cache directory")?;
         std::fs::create_dir_all(&config.mount_point).context("Failed to create mountpoint")?;
+
+        let db_path = config.cache_dir.join("musicfs.db");
+        let db = Arc::new(Database::open(&db_path).context("Failed to open metadata database")?);
+        info!("Metadata database opened at {:?}", db_path);
 
         let cas_config = CasConfig {
             chunks_dir: config.cache_dir.join("chunks"),
@@ -258,9 +262,9 @@ fn run_mount(config: musicfs_core::Config) -> Result<()> {
                     .unwrap();
                 let origin_path = PathBuf::from(path_str);
                 info!("Scanning music files for origin {}...", origin_cfg.id);
-                let origin_files = scan_music_files(&origin_path, &origin_id).await?;
+                let origin_files = scan_music_files(&origin_path, &origin_id, db.as_ref()).await?;
                 info!(
-                    "Fount {} music files for origin {}",
+                    "Found {} music files for origin {}",
                     origin_files.len(),
                     origin_cfg.id
                 );
@@ -273,12 +277,27 @@ fn run_mount(config: musicfs_core::Config) -> Result<()> {
             builder.add_file(file);
             fetcher.register_file(file.clone());
         }
-        let tree = Arc::new(RwLock::new(builder.build()));
-        info!("Virtual tree built");
+        let mut tree = builder.build();
+
+        let dirs = db.list_directories().unwrap_or_default();
+        for dir_path in &dirs {
+            if tree.get_by_path(dir_path).is_none() {
+                if let Err(e) = tree.mkdir(dir_path) {
+                    debug!("Could not restore directory {:?}: {:?}", dir_path, e);
+                }
+            }
+        }
+        info!(
+            "Virtual tree built ({} files, {} user directories)",
+            tree.file_count(),
+            dirs.len()
+        );
+
+        let tree = Arc::new(RwLock::new(tree));
 
         let reader = Arc::new(FileReader::with_fetcher(store, fetcher));
 
-        Ok::<_, anyhow::Error>((tree, reader))
+        Ok::<_, anyhow::Error>((tree, reader, db))
     })?;
 
     check_stale_mount(&config.mount_point)?;
@@ -288,7 +307,7 @@ fn run_mount(config: musicfs_core::Config) -> Result<()> {
         .context("Failed to acquire lock — is another instance running?")?;
     info!(lock_path = ?lock_path, "Lock acquired");
 
-    let fs = MusicFs::with_reader(tree, reader, handle.clone());
+    let fs = MusicFs::with_reader(tree, reader, handle.clone()).with_db(db);
 
     info!("Mounting filesystem at {:?}", config.mount_point);
 
@@ -459,7 +478,11 @@ fn init_basic_logging(level: &str) {
         .init();
 }
 
-async fn scan_music_files(dir: &Path, origin_id: &OriginId) -> Result<Vec<FileMeta>> {
+async fn scan_music_files(
+    dir: &Path,
+    origin_id: &OriginId,
+    db: &Database,
+) -> Result<Vec<FileMeta>> {
     let parser = MetadataParser::new();
     let mut files = Vec::new();
     let mut file_id_counter = 1i64;
@@ -469,6 +492,7 @@ async fn scan_music_files(dir: &Path, origin_id: &OriginId) -> Result<Vec<FileMe
         dir,
         origin_id,
         &parser,
+        db,
         &mut files,
         &mut file_id_counter,
     )
@@ -482,6 +506,7 @@ async fn scan_dir_recursive(
     dir: &Path,
     origin_id: &OriginId,
     parser: &MetadataParser,
+    db: &Database,
     files: &mut Vec<FileMeta>,
     id_counter: &mut i64,
 ) -> Result<()> {
@@ -493,11 +518,12 @@ async fn scan_dir_recursive(
 
         if metadata.is_dir() {
             Box::pin(scan_dir_recursive(
-                base, &path, origin_id, parser, files, id_counter,
+                base, &path, origin_id, parser, db, files, id_counter,
             ))
             .await?;
         } else if is_audio_file(&path) {
             let relative_path = path.strip_prefix(base).unwrap_or(&path);
+            let real_path_for_db = PathBuf::from("/").join(relative_path);
 
             let audio_meta = match parser.parse_file(&path) {
                 Ok(meta) => Some(meta),
@@ -507,15 +533,37 @@ async fn scan_dir_recursive(
                 }
             };
 
-            let virtual_path = build_virtual_path(&path, audio_meta.as_ref());
+            let virtual_path = if let Ok(Some(stored_path)) =
+                db.get_file_by_real_path(origin_id, &real_path_for_db)
+            {
+                stored_path
+            } else {
+                build_virtual_path(&path, audio_meta.as_ref())
+            };
+
+            let real_path = RealPath {
+                origin_id: origin_id.clone(),
+                path: real_path_for_db.clone(),
+            };
+
+            let file_id = db
+                .upsert_file(
+                    origin_id,
+                    &real_path.path,
+                    &virtual_path,
+                    audio_meta.as_ref().unwrap_or(&Default::default()),
+                    metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                    metadata.len(),
+                )
+                .unwrap_or_else(|e| {
+                    debug!("Failed to upsert file to DB: {}", e);
+                    FileId(*id_counter)
+                });
 
             let file_meta = FileMeta {
-                id: FileId(*id_counter),
+                id: file_id,
                 virtual_path,
-                real_path: RealPath {
-                    origin_id: origin_id.clone(),
-                    path: PathBuf::from("/").join(relative_path),
-                },
+                real_path,
                 size: metadata.len(),
                 mtime: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
                 content_hash: None,

@@ -13,5 +13,6 @@ pub use metadata::MetadataCache;
 pub use patterns::{AccessContext, AccessPattern, PatternError, PatternStore};
 pub use prefetch::{PrefetchConfig, PrefetchEngine, PrefetchHandle};
 pub use tree::{
-    DirNode, FileNode, Inode, RefreshPolicy, TreeBuilder, VirtualNode, VirtualTree, ROOT_INODE,
+    DirNode, FileNode, Inode, RefreshPolicy, RenameError, TreeBuilder, VirtualNode, VirtualTree,
+    ROOT_INODE,
 };
