@@ -16,6 +16,14 @@ service MusicFS {
   rpc SubscribeEvents(EventFilter) returns (stream Event);
 }
 
+service MetadataService {
+  rpc GetMetadata(GetMetadataRequest) returns (MetadataResponse);
+  rpc UpdateMetadata(UpdateMetadataRequest) returns (UpdateMetadataResponse);
+  rpc ClearOverlay(ClearOverlayRequest) returns (ClearOverlayResponse);
+  rpc BatchUpdateMetadata(BatchUpdateRequest) returns (stream BatchUpdateProgress);
+  rpc ImportMetadata(ImportMetadataRequest) returns (stream ImportProgress);
+}
+
 message Empty {}
 
 message SearchRequest {
@@ -173,4 +181,123 @@ message Event {
   optional string path = 4;
   optional int64 file_id = 5;
   map<string, string> metadata = 6;
+}
+
+// MetadataService messages
+
+message GetMetadataRequest {
+  string virtual_path = 1;
+}
+
+message MetadataResponse {
+  int64 file_id = 1;
+  optional string title = 2;
+  optional string artist = 3;
+  optional string album = 4;
+  optional string album_artist = 5;
+  optional uint32 year = 6;
+  optional uint32 track = 7;
+  optional uint32 disc = 8;
+  optional string genre = 9;
+  optional string format = 10;
+  optional uint64 duration_ms = 11;
+  optional uint64 bitrate = 12;
+  optional uint32 track_total = 13;
+  optional uint32 disc_total = 14;
+  optional string date = 15;
+  optional string composer = 16;
+  optional string comment = 17;
+  optional string lyrics = 18;
+  optional string copyright = 19;
+  optional bool compilation = 20;
+  optional string artist_sort = 21;
+  optional string album_artist_sort = 22;
+  optional string album_sort = 23;
+  optional string title_sort = 24;
+  optional string mb_recording_id = 25;
+  optional string mb_album_id = 26;
+  optional string mb_artist_id = 27;
+  optional string mb_album_artist_id = 28;
+  optional string mb_release_group_id = 29;
+  optional float replaygain_track_gain = 30;
+  optional float replaygain_track_peak = 31;
+  optional float replaygain_album_gain = 32;
+  optional float replaygain_album_peak = 33;
+  optional uint32 channels = 34;
+  optional uint32 bits_per_sample = 35;
+  optional string encoder = 36;
+  map<string, string> custom_tags = 50;
+}
+
+message UpdateMetadataRequest {
+  int64 file_id = 1;
+  optional string title = 2;
+  optional string artist = 3;
+  optional string album = 4;
+  optional string album_artist = 5;
+  optional uint32 track_number = 6;
+  optional uint32 disc_number = 7;
+  optional string date = 8;
+  optional string genre = 9;
+  optional string composer = 10;
+  optional string comment = 11;
+  optional string lyrics = 12;
+  optional string copyright = 13;
+  optional bool compilation = 14;
+  optional string artist_sort = 15;
+  optional string album_artist_sort = 16;
+  optional string album_sort = 17;
+  optional string title_sort = 18;
+  optional string mb_recording_id = 20;
+  optional string mb_album_id = 21;
+  optional string mb_artist_id = 22;
+  optional float replaygain_track_gain = 30;
+  optional float replaygain_track_peak = 31;
+  optional float replaygain_album_gain = 32;
+  optional float replaygain_album_peak = 33;
+  map<string, string> custom_tags = 50;
+}
+
+message UpdateMetadataResponse {
+  int64 file_id = 1;
+  bool success = 2;
+  optional string error_message = 3;
+}
+
+message ClearOverlayRequest {
+  int64 file_id = 1;
+}
+
+message ClearOverlayResponse {
+  int64 file_id = 1;
+  bool success = 2;
+  optional string error_message = 3;
+}
+
+message BatchUpdateRequest {
+  repeated BatchUpdateItem items = 1;
+}
+
+message BatchUpdateItem {
+  int64 file_id = 1;
+  UpdateMetadataRequest metadata = 2;
+}
+
+message BatchUpdateProgress {
+  uint32 completed = 1;
+  uint32 total = 2;
+  optional int64 current_file_id = 3;
+  optional string error_message = 4;
+}
+
+message ImportMetadataRequest {
+  string source_path = 1;
+  optional string format = 2;
+}
+
+message ImportProgress {
+  uint32 imported = 1;
+  uint32 total = 2;
+  optional string current_file = 3;
+  optional string error_message = 4;
 }
