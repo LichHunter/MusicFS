@@ -3,7 +3,9 @@ use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, ReplyOpen,
     Request,
 };
-use musicfs_cache::{Database, RemoveError, RenameError, VirtualNode, VirtualTree, ROOT_INODE};
+use musicfs_cache::{
+    Database, OverlayReader, RemoveError, RenameError, VirtualNode, VirtualTree, ROOT_INODE,
+};
 use musicfs_cas::FileReader;
 use musicfs_core::{Result, VirtualPath};
 use parking_lot::RwLock;
@@ -23,6 +25,7 @@ pub struct MusicFs {
     tree: Arc<RwLock<VirtualTree>>,
     reader: Option<Arc<FileReader>>,
     db: Option<Arc<Database>>,
+    overlay_reader: Option<Arc<OverlayReader>>,
     runtime_handle: Handle,
     search_ops: Option<SearchOps>,
     query_inodes: RwLock<HashMap<String, u64>>,
@@ -38,6 +41,7 @@ impl MusicFs {
             tree,
             reader: None,
             db: None,
+            overlay_reader: None,
             runtime_handle,
             search_ops: None,
             query_inodes: RwLock::new(HashMap::new()),
@@ -57,6 +61,7 @@ impl MusicFs {
             tree,
             reader: Some(reader),
             db: None,
+            overlay_reader: None,
             runtime_handle,
             search_ops: None,
             query_inodes: RwLock::new(HashMap::new()),
@@ -69,6 +74,11 @@ impl MusicFs {
 
     pub fn with_db(mut self, db: Arc<Database>) -> Self {
         self.db = Some(db);
+        self
+    }
+
+    pub fn with_overlay(mut self, overlay: Arc<OverlayReader>) -> Self {
+        self.overlay_reader = Some(overlay);
         self
     }
 
@@ -282,7 +292,27 @@ impl Filesystem for MusicFs {
 
         if let Some(node) = tree.get(ino) {
             trace!(ino, "inode found in tree");
-            let attr = self.node_to_attr(node);
+            let mut attr = self.node_to_attr(node);
+
+            if let VirtualNode::File(file) = node {
+                if let Some(ref overlay) = self.overlay_reader {
+                    match overlay.estimate_virtual_size(file.file_id) {
+                        Ok(Some(virtual_size)) => {
+                            trace!(ino, file_id = ?file.file_id, virtual_size, "using overlay virtual size");
+                            attr.size = virtual_size;
+                            attr.blocks =
+                                (virtual_size + BLOCK_SIZE as u64 - 1) / BLOCK_SIZE as u64;
+                        }
+                        Ok(None) => {
+                            trace!(ino, file_id = ?file.file_id, "no overlay, using original size");
+                        }
+                        Err(e) => {
+                            warn!(ino, file_id = ?file.file_id, error = %e, "overlay size estimation failed, using original");
+                        }
+                    }
+                }
+            }
+
             reply.attr(&TTL, &attr);
         } else {
             trace!(ino, "inode not found");
