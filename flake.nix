@@ -51,6 +51,7 @@
         gitleaks
 
         just
+        opencode
 
         pkg-config
         fuse3
