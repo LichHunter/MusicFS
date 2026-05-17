@@ -35,8 +35,8 @@ enum Commands {
     Mount {
         #[arg(short, long, help = "Config file path")]
         config: Option<PathBuf>,
-        #[arg(help = "Mount point")]
-        mountpoint: PathBuf,
+        #[arg(help = "Mount point (optional if provided in config file)")]
+        mountpoint: Option<PathBuf>,
         #[arg(short, long, help = "Source music directory")]
         origin: Option<PathBuf>,
         #[arg(short = 'd', long, help = "Cache directory")]
@@ -127,6 +127,9 @@ fn main() -> Result<()> {
             } else {
                 let origin_path = origin
                     .context("--origin is required for mount if no config file is provided")?;
+                let mp = mountpoint
+                    .clone()
+                    .context("mount point is required if no config file is provided")?;
                 let cache_dir = cache_dir.clone().unwrap_or_else(|| {
                     dirs::cache_dir()
                         .unwrap_or_else(|| PathBuf::from("/tmp"))
@@ -140,7 +143,7 @@ fn main() -> Result<()> {
                 );
 
                 musicfs_core::Config {
-                    mount_point: mountpoint.clone(),
+                    mount_point: mp,
                     cache_dir: cache_dir.clone(),
                     origins: vec![musicfs_core::OriginConfig {
                         id: "local".to_string(),
@@ -161,7 +164,9 @@ fn main() -> Result<()> {
             if let Some(c_dir) = cache_dir {
                 config.cache_dir = c_dir;
             }
-            config.mount_point = mountpoint;
+            if let Some(cli_mountpoint) = mountpoint {
+                config.mount_point = cli_mountpoint;
+            }
 
             let _guard = init_logging(&config.logging)?;
             run_mount(config)

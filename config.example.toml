@@ -1,25 +1,107 @@
+# MusicFS Configuration
+# Copy to /etc/musicfs/config.toml or ~/.config/musicfs/config.toml
+
+# Required: where to mount the virtual filesystem
 mount_point = "/mnt/music"
+
+# Required: directory for cache data (CAS chunks, metadata, search index)
 cache_dir = "/var/cache/musicfs"
 
+# ------------------------------------------------------------------------------
+# Origins - music sources (at least one required)
+# Supported types: local, nfs, smb, s3, sftp
+# Lower priority number = preferred source for failover
+# ------------------------------------------------------------------------------
+
 [[origins]]
-id = "local-storage"
+id = "local-music"
 origin_type = "local"
 priority = 1
 enabled = true
-path = "/path/to/local/music"
+path = "/home/user/Music"
+
+[[origins]]
+id = "nas-nfs"
+origin_type = "nfs"
+priority = 2
+enabled = true
+path = "/mnt/nas/music"
+
+[[origins]]
+id = "nas-smb"
+origin_type = "smb"
+priority = 3
+enabled = false
+path = "/mnt/smb/music"
+
+[[origins]]
+id = "cloud-backup"
+origin_type = "s3"
+priority = 10
+enabled = false
+bucket = "my-music-backup"
+region = "us-east-1"
+
+[[origins]]
+id = "remote-server"
+origin_type = "sftp"
+priority = 10
+enabled = false
+host = "music.example.com"
+port = 22
+user = "musicfs"
+path = "/srv/music"
+
+# ------------------------------------------------------------------------------
+# Cache settings
+# ------------------------------------------------------------------------------
 
 [cache]
+# In-memory metadata cache size (artist/album/track info)
 metadata_cache_mb = 100
+
+# On-disk content cache size (audio chunks)
 content_cache_gb = 10
 
+# ------------------------------------------------------------------------------
+# Health monitoring for origin failover
+# ------------------------------------------------------------------------------
+
 [health]
+# How often to check origin health
 check_interval_secs = 30
+
+# Timeout for health check probes
 timeout_ms = 5000
+
+# Consecutive failures before marking origin unhealthy
 unhealthy_threshold = 3
 
+# Per-origin type thresholds (overrides unhealthy_threshold)
+[health.per_origin_thresholds]
+local = 1
+nfs = 3
+smb = 3
+s3 = 3
+sftp = 3
+
+# ------------------------------------------------------------------------------
+# Logging
+# ------------------------------------------------------------------------------
+
 [logging]
+# Directory for log files
 log_dir = "/var/log/musicfs"
+
+# Output logs as JSON (for log aggregators)
 json_output = false
+
+# Send logs to systemd journal
 journald = true
+
+# Log level filter (tracing format)
+# Examples: "info", "debug", "musicfs=debug,warn", "musicfs_fuse=trace"
 level = "musicfs=info,warn"
+
+# Trace sampling rate for performance tracing (0.0 to 1.0)
 trace_sample_rate = 1.0
