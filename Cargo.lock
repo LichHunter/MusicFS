@@ -1925,6 +1925,7 @@ dependencies = [
  "rmp-serde",
  "rusqlite",
  "serde",
+ "serde_json",
  "sled",
  "tempfile",
  "thiserror 1.0.69",
