@@ -4,7 +4,8 @@ use fuser::{
     Request,
 };
 use musicfs_cache::{
-    Database, OverlayReader, RemoveError, RenameError, VirtualNode, VirtualTree, ROOT_INODE,
+    Database, OverlayError, OverlayReader, RemoveError, RenameError, VirtualNode, VirtualTree,
+    ROOT_INODE,
 };
 use musicfs_cas::FileReader;
 use musicfs_core::{Result, VirtualPath};
@@ -442,42 +443,89 @@ impl Filesystem for MusicFs {
             }
         };
 
-        let Some(reader) = &self.reader else {
-            trace!(ino, "no reader available");
-            reply.data(&[]);
-            return;
-        };
-
-        let reader = reader.clone();
         let handle = self.runtime_handle.clone();
-        let result = std::thread::scope(|_| {
-            handle.block_on(async {
-                tokio::time::timeout(
-                    Duration::from_secs(30),
-                    reader.read(file_id, offset as u64, size),
-                )
-                .await
-            })
-        });
 
-        match result {
-            Ok(Ok(data)) => {
-                trace!(
-                    ino,
-                    offset,
-                    size_bytes = size,
-                    bytes_read = data.len(),
-                    "read successful"
-                );
-                reply.data(&data);
+        if let Some(ref overlay) = self.overlay_reader {
+            let overlay = overlay.clone();
+            let result = std::thread::scope(|_| {
+                handle.block_on(async {
+                    tokio::time::timeout(
+                        Duration::from_secs(30),
+                        overlay.read(file_id, offset as u64, size),
+                    )
+                    .await
+                })
+            });
+
+            match result {
+                Ok(Ok(data)) => {
+                    trace!(
+                        ino,
+                        offset,
+                        size_bytes = size,
+                        bytes_read = data.len(),
+                        "overlay read successful"
+                    );
+                    reply.data(&data);
+                }
+                Ok(Err(e)) => {
+                    let errno = match &e {
+                        OverlayError::NotFound(_) => libc::ENOENT,
+                        OverlayError::Database(_) => libc::EIO,
+                        OverlayError::Handler(_) => libc::EIO,
+                        OverlayError::Cas(_) => libc::EIO,
+                        OverlayError::NoHandler(_) => libc::EIO,
+                    };
+                    warn!(ino, offset, size_bytes = size, error = %e, "overlay read failed");
+                    reply.error(errno);
+                }
+                Err(_timeout) => {
+                    warn!(
+                        ino,
+                        offset,
+                        size_bytes = size,
+                        "overlay read timed out after 30s"
+                    );
+                    reply.error(libc::EIO);
+                }
             }
-            Ok(Err(e)) => {
-                warn!(ino, offset, size_bytes = size, error = %e, "read failed");
-                reply.error(libc::EIO);
-            }
-            Err(_timeout) => {
-                warn!(ino, offset, size_bytes = size, "read timed out after 30s");
-                reply.error(libc::EIO);
+        } else {
+            let Some(reader) = &self.reader else {
+                trace!(ino, "no reader available");
+                reply.data(&[]);
+                return;
+            };
+
+            let reader = reader.clone();
+            let result = std::thread::scope(|_| {
+                handle.block_on(async {
+                    tokio::time::timeout(
+                        Duration::from_secs(30),
+                        reader.read(file_id, offset as u64, size),
+                    )
+                    .await
+                })
+            });
+
+            match result {
+                Ok(Ok(data)) => {
+                    trace!(
+                        ino,
+                        offset,
+                        size_bytes = size,
+                        bytes_read = data.len(),
+                        "read successful"
+                    );
+                    reply.data(&data);
+                }
+                Ok(Err(e)) => {
+                    warn!(ino, offset, size_bytes = size, error = %e, "read failed");
+                    reply.error(libc::EIO);
+                }
+                Err(_timeout) => {
+                    warn!(ino, offset, size_bytes = size, "read timed out after 30s");
+                    reply.error(libc::EIO);
+                }
             }
         }
     }
