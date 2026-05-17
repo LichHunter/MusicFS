@@ -5,7 +5,7 @@ use crate::proto::musicfs::v1::{
     ClearOverlayRequest, ClearOverlayResponse, GetMetadataRequest, ImportMetadataRequest,
     ImportProgress, MetadataResponse, UpdateMetadataRequest, UpdateMetadataResponse,
 };
-use musicfs_cache::Database;
+use musicfs_cache::{Database, EnrichmentUpdate};
 use musicfs_core::{AudioMeta, FileId, VirtualPath};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -63,6 +63,9 @@ impl MetadataServiceImpl {
             channels: meta.channels,
             bits_per_sample: meta.bits_per_sample,
             encoder: meta.encoder.clone(),
+            label: None,
+            album_type: None,
+            cover_url: None,
             custom_tags: Default::default(),
         }
     }
@@ -160,24 +163,40 @@ impl MetadataService for MetadataServiceImpl {
 
         let audio_meta = Self::request_to_audio_meta(&req);
 
-        match self.db.update_metadata(file_id, &audio_meta) {
-            Ok(()) => {
-                debug!(file_id = req.file_id, "Metadata updated successfully");
-                Ok(Response::new(UpdateMetadataResponse {
-                    file_id: req.file_id,
-                    success: true,
-                    error_message: None,
-                }))
-            }
-            Err(e) => {
-                warn!(file_id = req.file_id, error = %e, "Failed to update metadata");
-                Ok(Response::new(UpdateMetadataResponse {
+        if let Err(e) = self.db.update_metadata(file_id, &audio_meta) {
+            warn!(file_id = req.file_id, error = %e, "Failed to update metadata");
+            return Ok(Response::new(UpdateMetadataResponse {
+                file_id: req.file_id,
+                success: false,
+                error_message: Some(e.to_string()),
+            }));
+        }
+
+        if req.label.is_some() || req.album_type.is_some() || req.cover_url.is_some() {
+            let enrichment = EnrichmentUpdate {
+                label: req.label.clone(),
+                album_type: req.album_type.clone(),
+                cover_url: req.cover_url.clone(),
+                genres_json: None,
+                primary_genre: None,
+                source: "orchestrator".to_string(),
+            };
+            if let Err(e) = self.db.update_enrichment(file_id, &enrichment) {
+                warn!(file_id = req.file_id, error = %e, "Failed to update enrichment");
+                return Ok(Response::new(UpdateMetadataResponse {
                     file_id: req.file_id,
                     success: false,
                     error_message: Some(e.to_string()),
-                }))
+                }));
             }
         }
+
+        debug!(file_id = req.file_id, "Metadata updated successfully");
+        Ok(Response::new(UpdateMetadataResponse {
+            file_id: req.file_id,
+            success: true,
+            error_message: None,
+        }))
     }
 
     #[instrument(level = "info", skip(self, request), fields(method = "clear_overlay"))]
@@ -239,7 +258,28 @@ impl MetadataService for MetadataServiceImpl {
                 let error_message = if let Some(ref metadata_req) = item.metadata {
                     let audio_meta = MetadataServiceImpl::request_to_audio_meta(metadata_req);
                     match db.update_metadata(file_id, &audio_meta) {
-                        Ok(()) => None,
+                        Ok(()) => {
+                            if metadata_req.label.is_some()
+                                || metadata_req.album_type.is_some()
+                                || metadata_req.cover_url.is_some()
+                            {
+                                let enrichment = EnrichmentUpdate {
+                                    label: metadata_req.label.clone(),
+                                    album_type: metadata_req.album_type.clone(),
+                                    cover_url: metadata_req.cover_url.clone(),
+                                    genres_json: None,
+                                    primary_genre: None,
+                                    source: "orchestrator".to_string(),
+                                };
+                                if let Err(e) = db.update_enrichment(file_id, &enrichment) {
+                                    Some(e.to_string())
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        }
                         Err(e) => Some(e.to_string()),
                     }
                 } else {

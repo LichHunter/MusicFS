@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package musicfs.v1;
 
+option go_package = "homelab.lan/music-agregator/gen/musicfs/v1;musicfsv1";
+
 service MusicFS {
   rpc Search(SearchRequest) returns (SearchResponse);
   rpc SearchStream(SearchRequest) returns (stream SearchResult);
@@ -152,6 +154,10 @@ message OriginInfo {
 
 message OriginRequest {
   string origin_id = 1;
+  // Optional subdirectory to scope the scan (relative to origin root).
+  // If empty, scans the entire origin.
+  // Example: "Metallica - Master of Puppets (1986) [FLAC]"
+  optional string subdir = 2;
 }
 
 message OriginHealthResponse {
@@ -167,6 +173,13 @@ message SyncProgress {
   uint32 total = 3;
   string current_path = 4;
   uint64 bytes_synced = 5;
+  repeated SyncedFile new_files = 6;
+}
+
+message SyncedFile {
+  string path = 1;
+  int64 file_id = 2;
+  string virtual_path = 3;
 }
 
 message EventFilter {
@@ -226,6 +239,9 @@ message MetadataResponse {
   optional uint32 channels = 34;
   optional uint32 bits_per_sample = 35;
   optional string encoder = 36;
+  optional string label = 40;
+  optional string album_type = 41;
+  optional string cover_url = 42;
   map<string, string> custom_tags = 50;
 }
 
@@ -255,6 +271,9 @@ message UpdateMetadataRequest {
   optional float replaygain_track_peak = 31;
   optional float replaygain_album_gain = 32;
   optional float replaygain_album_peak = 33;
+  optional string label = 40;
+  optional string album_type = 41;
+  optional string cover_url = 42;
   map<string, string> custom_tags = 50;
 }
 

@@ -10,6 +10,7 @@ use musicfs_cache::{
 use musicfs_cas::{CasConfig, CasStore, ContentFetcher, FileReader};
 use musicfs_core::{FileId, FileMeta, LoggingConfig, OriginId, RealPath, VirtualPath};
 use musicfs_fuse::MusicFs;
+use musicfs_grpc::{MetadataServiceImpl, MusicFsServer as GrpcServer};
 use musicfs_metadata::MetadataParser;
 use musicfs_origins::{LocalOrigin, Origin};
 use parking_lot::RwLock;
@@ -47,6 +48,8 @@ enum Commands {
         origin: Option<PathBuf>,
         #[arg(short = 'd', long, help = "Cache directory")]
         cache_dir: Option<PathBuf>,
+        #[arg(long, default_value = "50052", help = "gRPC server port")]
+        grpc_port: u16,
     },
     Status,
     Cache {
@@ -165,6 +168,7 @@ fn main() -> Result<()> {
             mountpoint,
             origin,
             cache_dir,
+            grpc_port,
         } => {
             let mut config = if let Some(config_path) = config {
                 musicfs_core::Config::from_file(&config_path)?
@@ -213,7 +217,7 @@ fn main() -> Result<()> {
             }
 
             let _guard = init_logging(&config.logging)?;
-            run_mount(config)
+            run_mount(config, grpc_port)
         }
         Commands::Status => {
             init_basic_logging(&cli.log_level);
@@ -259,11 +263,11 @@ fn run_metadata(endpoint: String, command: MetadataCommand) -> Result<()> {
     runtime.block_on(metadata::run_metadata(command, &endpoint))
 }
 
-fn run_mount(config: musicfs_core::Config) -> Result<()> {
+fn run_mount(config: musicfs_core::Config, grpc_port: u16) -> Result<()> {
     let runtime = tokio::runtime::Runtime::new().context("Failed to create Tokio runtime")?;
     let handle = runtime.handle().clone();
 
-    let (tree, reader, db, overlay_reader) = runtime.block_on(async {
+    let (tree, reader, db, overlay_reader, origin_root, fetcher) = runtime.block_on(async {
         info!(mountpoint = ?config.mount_point, "Mount configuration");
         info!("Cache directory: {:?}", config.cache_dir);
 
@@ -364,7 +368,7 @@ fn run_mount(config: musicfs_core::Config) -> Result<()> {
 
         let tree = Arc::new(RwLock::new(tree));
 
-        let reader = Arc::new(FileReader::with_fetcher(store.clone(), fetcher));
+        let reader = Arc::new(FileReader::with_fetcher(store.clone(), fetcher.clone()));
 
         // Create overlay reader for metadata synthesis
         let overlay_reader = Arc::new(OverlayReader::new(
@@ -373,7 +377,15 @@ fn run_mount(config: musicfs_core::Config) -> Result<()> {
             reader.clone(),
         ));
 
-        Ok::<_, anyhow::Error>((tree, reader, db, overlay_reader))
+        let first_origin_root = config
+            .origins
+            .iter()
+            .find(|o| o.enabled && o.origin_type == musicfs_core::OriginType::Local)
+            .and_then(|o| o.settings.get("path").and_then(|v| v.as_str()))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/"));
+
+        Ok::<_, anyhow::Error>((tree, reader, db, overlay_reader, first_origin_root, fetcher))
     })?;
 
     check_stale_mount(&config.mount_point)?;
@@ -388,6 +400,8 @@ fn run_mount(config: musicfs_core::Config) -> Result<()> {
         .context("Failed to write PID file")?;
     info!(pid_path = ?pid_path, "PID file written");
 
+    let grpc_db = db.clone();
+    let tree_for_grpc = tree.clone();
     let tree_for_restore = tree.clone();
     let db_for_restore = db.clone();
 
@@ -410,6 +424,34 @@ fn run_mount(config: musicfs_core::Config) -> Result<()> {
     info!("MusicFS ready, PID {}", std::process::id());
 
     let shutdown_token = tokio_util::sync::CancellationToken::new();
+
+    let event_bus = Arc::new(musicfs_core::EventBus::default());
+    let grpc_event_bus = event_bus.clone();
+    let grpc_origin_root = origin_root.clone();
+    let grpc_shutdown = shutdown_token.clone();
+
+    runtime.spawn(async move {
+        let addr = format!("0.0.0.0:{}", grpc_port).parse().unwrap();
+
+        let grpc_tree = tree_for_grpc.clone();
+        let grpc_fetcher = fetcher.clone();
+        let musicfs_server = GrpcServer::new(grpc_event_bus, grpc_db.clone(), grpc_tree, grpc_fetcher, grpc_origin_root);
+        let metadata_server = MetadataServiceImpl::new(grpc_db);
+
+        info!(%addr, "gRPC server starting");
+
+        let result = tonic::transport::Server::builder()
+            .add_service(musicfs_grpc::proto::musicfs::v1::music_fs_server::MusicFsServer::new(musicfs_server))
+            .add_service(musicfs_grpc::proto::musicfs::v1::metadata_service_server::MetadataServiceServer::new(metadata_server))
+            .serve_with_shutdown(addr, async move {
+                grpc_shutdown.cancelled().await;
+            })
+            .await;
+
+        if let Err(e) = result {
+            tracing::error!(error = %e, "gRPC server error");
+        }
+    });
 
     runtime.block_on(async {
         let mut sigterm =

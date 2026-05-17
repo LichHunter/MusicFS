@@ -46,6 +46,15 @@ CREATE TABLE IF NOT EXISTS files (
     encoder         TEXT,
     custom_tags     TEXT,
     format_layout   BLOB,
+
+    label           TEXT,
+    album_type      TEXT,
+    cover_url       TEXT,
+    genres_json     TEXT,
+    enrichment_source TEXT,
+    enriched_at     INTEGER,
+    enrichment_attempts INTEGER NOT NULL DEFAULT 0,
+    last_enrichment_error TEXT,
     
     origin_mtime    INTEGER NOT NULL,
     origin_size     INTEGER NOT NULL,

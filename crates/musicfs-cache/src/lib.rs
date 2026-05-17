@@ -11,7 +11,7 @@ mod prefetch;
 mod tree;
 
 pub use artwork::{ArtworkCache, ArtworkError, CachedArtwork};
-pub use db::{Database, TrashedFile, TrashedFilter};
+pub use db::{Database, EnrichmentUpdate, TrashedFile, TrashedFilter};
 pub use eviction::{EvictionError, EvictionPolicy, LruEviction};
 pub use format_handler::{FormatError, FormatHandler, FormatHandlerRegistry};
 pub use format_layout::FormatLayout;

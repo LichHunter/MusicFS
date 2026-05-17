@@ -786,6 +786,70 @@ impl Database {
         Ok(())
     }
 
+    pub fn update_enrichment(
+        &self,
+        file_id: FileId,
+        enrichment: &EnrichmentUpdate,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut set_clauses = vec![
+            "label = ?1".to_string(),
+            "album_type = ?2".to_string(),
+            "cover_url = ?3".to_string(),
+            "enrichment_source = ?4".to_string(),
+            "enriched_at = strftime('%s', 'now')".to_string(),
+            "enrichment_attempts = 0".to_string(),
+            "last_enrichment_error = NULL".to_string(),
+        ];
+
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![
+            Box::new(enrichment.label.clone()),
+            Box::new(enrichment.album_type.clone()),
+            Box::new(enrichment.cover_url.clone()),
+            Box::new(enrichment.source.clone()),
+        ];
+
+        if let Some(ref genres) = enrichment.genres_json {
+            params_vec.push(Box::new(genres.clone()));
+            set_clauses.push(format!("genres_json = ?{}", params_vec.len()));
+        }
+        if let Some(ref genre) = enrichment.primary_genre {
+            params_vec.push(Box::new(genre.clone()));
+            set_clauses.push(format!("genre = ?{}", params_vec.len()));
+        }
+
+        params_vec.push(Box::new(file_id.0));
+        let id_param = params_vec.len();
+
+        let sql = format!(
+            "UPDATE files SET {} WHERE id = ?{}",
+            set_clauses.join(", "),
+            id_param
+        );
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
+
+        let rows = conn
+            .execute(&sql, params_refs.as_slice())
+            .map_err(|e| Error::Database(format!("update_enrichment failed: {}", e)))?;
+
+        if rows == 0 {
+            return Err(Error::FileNotFound(format!(
+                "file id {} not found",
+                file_id.0
+            )));
+        }
+
+        debug!(
+            id = file_id.0,
+            source = &enrichment.source,
+            "updated enrichment metadata"
+        );
+        Ok(())
+    }
+
     pub fn clear_overlay(&self, file_id: FileId) -> Result<()> {
         let conn = self.conn.lock().unwrap();
 
@@ -802,7 +866,10 @@ impl Database {
                     mb_recording_id = NULL, mb_album_id = NULL, mb_artist_id = NULL, mb_album_artist_id = NULL, mb_release_group_id = NULL,
                     replaygain_track_gain = NULL, replaygain_track_peak = NULL, replaygain_album_gain = NULL, replaygain_album_peak = NULL,
                     channels = NULL, bits_per_sample = NULL, encoder = NULL,
-                    custom_tags = NULL, format_layout = NULL
+                    custom_tags = NULL, format_layout = NULL,
+                    label = NULL, album_type = NULL, cover_url = NULL, genres_json = NULL,
+                    enrichment_source = NULL, enriched_at = NULL,
+                    enrichment_attempts = 0, last_enrichment_error = NULL
                 WHERE id = ?1
                 "#,
                 params![file_id.0],
@@ -946,6 +1013,16 @@ pub struct TrashedFile {
     pub original_path: VirtualPath,
     pub trashed_at: i64,
     pub origin_id: OriginId,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EnrichmentUpdate {
+    pub label: Option<String>,
+    pub album_type: Option<String>,
+    pub cover_url: Option<String>,
+    pub genres_json: Option<String>,
+    pub primary_genre: Option<String>,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, Default)]

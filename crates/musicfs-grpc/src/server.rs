@@ -2,11 +2,11 @@ use crate::proto::musicfs::v1::{
     music_fs_server::MusicFs, CacheStats, ClearCacheRequest, ClearCacheResponse, Empty, Event,
     EventFilter, HealthStatus, MountState, OriginHealthResponse, OriginRequest, OriginsResponse,
     PrefetchProgress, PrefetchRequest, SearchRequest, SearchResponse, SearchResult,
-    ShutdownRequest, StatusResponse, SyncProgress, TierStats,
+    ShutdownRequest, StatusResponse, SyncProgress, SyncedFile, TierStats,
 };
 use musicfs_core::{Event as CoreEvent, EventBus};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -16,14 +16,30 @@ pub struct MusicFsServer {
     start_time: Instant,
     event_bus: Arc<EventBus>,
     version: String,
+    scanner: Arc<crate::scanner::OriginScanner>,
+    origin_root: std::path::PathBuf,
 }
 
 impl MusicFsServer {
-    pub fn new(event_bus: Arc<EventBus>) -> Self {
+    pub fn new(
+        event_bus: Arc<EventBus>,
+        db: Arc<musicfs_cache::Database>,
+        tree: Arc<parking_lot::RwLock<musicfs_cache::VirtualTree>>,
+        fetcher: Arc<musicfs_cas::ContentFetcher>,
+        origin_root: std::path::PathBuf,
+    ) -> Self {
+        let scanner = Arc::new(crate::scanner::OriginScanner::new(
+            db,
+            event_bus.clone(),
+            tree,
+            fetcher,
+        ));
         Self {
             start_time: Instant::now(),
             event_bus,
             version: env!("CARGO_PKG_VERSION").to_string(),
+            scanner,
+            origin_root,
         }
     }
 
@@ -368,24 +384,85 @@ impl MusicFs for MusicFsServer {
         request: Request<OriginRequest>,
     ) -> Result<Response<Self::RescanOriginStream>, Status> {
         let req = request.into_inner();
-        info!(origin_id = %req.origin_id, "gRPC rescan_origin started");
+        let subdir = req.subdir.as_deref().filter(|s| !s.is_empty());
+        info!(
+            origin_id = %req.origin_id,
+            subdir = ?subdir,
+            "gRPC rescan_origin started"
+        );
 
         let (tx, rx) = mpsc::channel(32);
+        let (progress_tx, mut progress_rx) = mpsc::channel::<crate::scanner::ScanProgress>(64);
+
+        let origin_id = musicfs_core::OriginId::from(req.origin_id.as_str());
+        let scanner = self.scanner.clone();
+        let origin_root = self.origin_root.clone();
+        let subdir_owned = subdir.map(|s| s.to_string());
 
         tokio::spawn(async move {
-            let phases = ["scanning", "indexing", "complete"];
-            for (i, phase) in phases.iter().enumerate() {
-                let progress = SyncProgress {
-                    phase: phase.to_string(),
-                    current: i as u32 + 1,
-                    total: phases.len() as u32,
-                    current_path: String::new(),
-                    bytes_synced: 0,
-                };
-                if tx.send(Ok(progress)).await.is_err() {
-                    break;
+            let forward_handle = {
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    while let Some(progress) = progress_rx.recv().await {
+                        let proto = SyncProgress {
+                            phase: progress.phase,
+                            current: progress.current,
+                            total: progress.total,
+                            current_path: progress.current_path,
+                            bytes_synced: progress.bytes_synced,
+                            new_files: vec![],
+                        };
+                        if tx.send(Ok(proto)).await.is_err() {
+                            break;
+                        }
+                    }
+                })
+            };
+
+            let result = scanner
+                .scan(
+                    &origin_id,
+                    &origin_root,
+                    subdir_owned.as_deref(),
+                    progress_tx,
+                )
+                .await;
+
+            forward_handle.abort();
+
+            match result {
+                Ok(scan_result) => {
+                    let synced_files: Vec<SyncedFile> = scan_result
+                        .new_files
+                        .iter()
+                        .map(|f| SyncedFile {
+                            path: f.path.clone(),
+                            file_id: f.file_id.0,
+                            virtual_path: f.virtual_path.clone(),
+                        })
+                        .collect();
+
+                    let _ = tx
+                        .send(Ok(SyncProgress {
+                            phase: "complete".to_string(),
+                            current: scan_result.new_files.len() as u32
+                                + scan_result.changed
+                                + scan_result.deleted,
+                            total: scan_result.new_files.len() as u32
+                                + scan_result.changed
+                                + scan_result.deleted
+                                + scan_result.unchanged,
+                            current_path: String::new(),
+                            bytes_synced: scan_result.bytes_synced,
+                            new_files: synced_files,
+                        }))
+                        .await;
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                Err(e) => {
+                    let _ = tx
+                        .send(Err(Status::internal(format!("rescan failed: {}", e))))
+                        .await;
+                }
             }
         });
 
@@ -438,10 +515,26 @@ impl MusicFs for MusicFsServer {
 mod tests {
     use super::*;
 
+    async fn make_test_server() -> (MusicFsServer, tempfile::TempDir) {
+        let event_bus = Arc::new(EventBus::new(16));
+        let db = Arc::new(musicfs_cache::Database::open_memory().unwrap());
+        let tree = Arc::new(parking_lot::RwLock::new(
+            musicfs_cache::TreeBuilder::new().build(),
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = musicfs_cas::CasConfig {
+            chunks_dir: dir.path().join("chunks"),
+            ..Default::default()
+        };
+        let store = Arc::new(musicfs_cas::CasStore::open(cfg).await.unwrap());
+        let fetcher = Arc::new(musicfs_cas::ContentFetcher::new(store));
+        let origin_root = std::path::PathBuf::from("/tmp/test-origin");
+        (MusicFsServer::new(event_bus, db, tree, fetcher, origin_root), dir)
+    }
+
     #[tokio::test]
     async fn test_get_status() {
-        let event_bus = Arc::new(EventBus::new(16));
-        let server = MusicFsServer::new(event_bus);
+        let (server, _dir) = make_test_server().await;
 
         let response = server.get_status(Request::new(Empty {})).await.unwrap();
         let status = response.into_inner();
@@ -452,8 +545,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_cache_stats() {
-        let event_bus = Arc::new(EventBus::new(16));
-        let server = MusicFsServer::new(event_bus);
+        let (server, _dir) = make_test_server().await;
 
         let response = server
             .get_cache_stats(Request::new(Empty {}))

@@ -5,8 +5,11 @@ edition.workspace = true
 
 [dependencies]
 musicfs-cache = { path = "../musicfs-cache" }
+musicfs-cas = { path = "../musicfs-cas" }
+musicfs-metadata = { path = "../musicfs-metadata" }
 musicfs-search = { path = "../musicfs-search" }
 musicfs-core = { path = "../musicfs-core" }
+parking_lot.workspace = true
 tonic.workspace = true
 prost.workspace = true
 tokio.workspace = true

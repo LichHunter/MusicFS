@@ -387,6 +387,9 @@ async fn run_set(
             replaygain_track_peak: fields.replaygain_track_peak,
             replaygain_album_gain: fields.replaygain_album_gain,
             replaygain_album_peak: fields.replaygain_album_peak,
+            label: None,
+            album_type: None,
+            cover_url: None,
             custom_tags: fields.custom_tags,
         }
     } else {
@@ -416,6 +419,9 @@ async fn run_set(
             replaygain_track_peak: None,
             replaygain_album_gain: None,
             replaygain_album_peak: None,
+            label: None,
+            album_type: None,
+            cover_url: None,
             custom_tags: HashMap::new(),
         }
     };

@@ -7,6 +7,7 @@ pub mod proto {
 }
 
 mod metadata;
+pub mod scanner;
 mod search_service;
 mod server;
 mod webhook;
