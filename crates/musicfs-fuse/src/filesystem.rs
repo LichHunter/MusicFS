@@ -3,7 +3,7 @@ use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, ReplyOpen,
     Request,
 };
-use musicfs_cache::{Database, RenameError, VirtualNode, VirtualTree, ROOT_INODE};
+use musicfs_cache::{Database, RemoveError, RenameError, VirtualNode, VirtualTree, ROOT_INODE};
 use musicfs_cas::FileReader;
 use musicfs_core::{Result, VirtualPath};
 use parking_lot::RwLock;
@@ -546,12 +546,115 @@ impl Filesystem for MusicFs {
         }
     }
 
-    fn unlink(&mut self, _req: &Request, _parent: u64, _name: &OsStr, reply: fuser::ReplyEmpty) {
-        reply.error(libc::EROFS);
+    fn unlink(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
+        let path = match self.resolve_path(parent, name) {
+            Some(p) => p,
+            None => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+        };
+
+        let (file_id, is_dir) = {
+            let tree = self.tree.read();
+            match tree.get_by_path(&path) {
+                Some(VirtualNode::File(f)) => (Some(f.file_id), false),
+                Some(VirtualNode::Directory(_)) => (None, true),
+                None => {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
+            }
+        };
+
+        if is_dir {
+            reply.error(libc::EISDIR);
+            return;
+        }
+
+        let trash_path = VirtualPath::new(format!("/.trash{}", path.as_str()));
+
+        {
+            let mut tree = self.tree.write();
+            tree.ensure_trash_dir();
+
+            let trash_parent = std::path::Path::new(trash_path.as_str())
+                .parent()
+                .map(|p| VirtualPath::new(p.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| VirtualPath::new("/.trash"));
+
+            if let Err(e) = tree.mkdir_p(&trash_parent) {
+                if !matches!(e, RenameError::TargetExists) {
+                    warn!(error = ?e, "failed to create trash parent directories");
+                    reply.error(libc::EIO);
+                    return;
+                }
+            }
+
+            if let Err(e) = tree.rename_file(&path, &trash_path) {
+                match e {
+                    RenameError::SourceNotFound => reply.error(libc::ENOENT),
+                    RenameError::TargetExists => reply.error(libc::EEXIST),
+                    _ => reply.error(libc::EIO),
+                }
+                return;
+            }
+        }
+
+        if let (Some(ref db), Some(id)) = (&self.db, file_id) {
+            if let Err(e) = db.update_virtual_path(id, &trash_path) {
+                warn!(error = %e, "failed to update virtual path in database");
+            }
+            if let Err(e) = db.mark_trashed(id, &path) {
+                warn!(error = %e, "failed to mark file as trashed in database");
+            }
+        }
+
+        debug!(path = %path.as_str(), trash = %trash_path.as_str(), "file moved to trash");
+        reply.ok();
     }
 
-    fn rmdir(&mut self, _req: &Request, _parent: u64, _name: &OsStr, reply: fuser::ReplyEmpty) {
-        reply.error(libc::EROFS);
+    fn rmdir(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
+        let path = match self.resolve_path(parent, name) {
+            Some(p) => p,
+            None => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+        };
+
+        if VirtualTree::is_trash_path(&path) {
+            reply.error(libc::EPERM);
+            return;
+        }
+
+        {
+            let mut tree = self.tree.write();
+            match tree.remove_directory(&path) {
+                Ok(()) => {}
+                Err(RemoveError::NotFound) => {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
+                Err(RemoveError::NotEmpty) => {
+                    reply.error(libc::ENOTEMPTY);
+                    return;
+                }
+                Err(RemoveError::NotDirectory) => {
+                    reply.error(libc::ENOTDIR);
+                    return;
+                }
+            }
+        }
+
+        if let Some(ref db) = self.db {
+            if let Err(e) = db.delete_directory(&path) {
+                warn!(error = %e, "failed to delete directory from database");
+            }
+        }
+
+        debug!(path = %path.as_str(), "directory removed");
+        reply.ok();
     }
 
     fn rename(
@@ -634,6 +737,14 @@ impl Filesystem for MusicFs {
                     if let (Some(ref db), Some(id)) = (&self.db, file_id) {
                         if let Err(e) = db.update_virtual_path(id, &new_path) {
                             warn!(error = %e, "failed to persist file rename to database");
+                        }
+                        let was_in_trash = VirtualTree::is_trash_path(&old_path);
+                        let now_in_trash = VirtualTree::is_trash_path(&new_path);
+                        if was_in_trash && !now_in_trash {
+                            if let Err(e) = db.unmark_trashed(id) {
+                                warn!(error = %e, "failed to unmark trashed after restore");
+                            }
+                            debug!(path = %new_path.as_str(), "file restored from trash");
                         }
                     }
                     debug!(old = %old_path.as_str(), new = %new_path.as_str(), "file renamed");

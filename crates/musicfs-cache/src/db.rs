@@ -145,9 +145,19 @@ impl Database {
         .map_err(|e| Error::Database(format!("upsert failed: {}", e)))?;
 
         let id = conn.last_insert_rowid();
-        debug!(id, vpath = virtual_path.as_str(), "Upserted file");
+        let file_id = if id == 0 {
+            conn.query_row(
+                "SELECT id FROM files WHERE origin_id = ?1 AND real_path = ?2",
+                params![&origin_id.0, real_path.to_string_lossy()],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|e| Error::Database(format!("failed to get file id after upsert: {}", e)))?
+        } else {
+            id
+        };
+        debug!(id = file_id, vpath = virtual_path.as_str(), "Upserted file");
 
-        Ok(FileId(id))
+        Ok(FileId(file_id))
     }
 
     pub fn get_file_by_virtual_path(&self, path: &VirtualPath) -> Result<Option<FileMeta>> {
@@ -424,6 +434,140 @@ impl Database {
         .optional()
         .map_err(|e| Error::Database(format!("query failed: {}", e)))
     }
+
+    pub fn mark_trashed(&self, id: FileId, original_path: &VirtualPath) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn
+            .execute(
+                "UPDATE files SET trashed = 1, original_path = ?1, trashed_at = strftime('%s', 'now') WHERE id = ?2",
+                params![original_path.as_str(), id.0],
+            )
+            .map_err(|e| Error::Database(format!("mark_trashed failed: {}", e)))?;
+
+        if rows == 0 {
+            return Err(Error::FileNotFound(format!("file id {} not found", id.0)));
+        }
+        debug!(
+            id = id.0,
+            original_path = original_path.as_str(),
+            "marked file as trashed"
+        );
+        Ok(())
+    }
+
+    pub fn unmark_trashed(&self, id: FileId) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE files SET trashed = 0, original_path = NULL, trashed_at = NULL WHERE id = ?1",
+            params![id.0],
+        )
+        .map_err(|e| Error::Database(format!("unmark_trashed failed: {}", e)))?;
+        debug!(id = id.0, "unmarked file as trashed");
+        Ok(())
+    }
+
+    pub fn list_trashed(&self, filter: &TrashedFilter) -> Result<Vec<TrashedFile>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut sql = String::from(
+            "SELECT id, virtual_path, original_path, trashed_at, origin_id FROM files WHERE trashed = 1",
+        );
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(ref origin) = filter.origin_id {
+            sql.push_str(" AND origin_id = ?");
+            params_vec.push(Box::new(origin.0.clone()));
+        }
+
+        if let Some(ref prefix) = filter.path_prefix {
+            sql.push_str(" AND original_path LIKE ?");
+            params_vec.push(Box::new(format!("{}%", prefix)));
+        }
+
+        if let Some(since) = filter.since {
+            let cutoff = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64
+                - since.as_secs() as i64;
+            sql.push_str(" AND trashed_at >= ?");
+            params_vec.push(Box::new(cutoff));
+        }
+
+        sql.push_str(" ORDER BY trashed_at DESC");
+
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| Error::Database(format!("prepare failed: {}", e)))?;
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
+
+        let files: Vec<TrashedFile> = stmt
+            .query_map(params_refs.as_slice(), |row| {
+                Ok(TrashedFile {
+                    file_id: FileId(row.get(0)?),
+                    current_path: VirtualPath::new(row.get::<_, String>(1)?),
+                    original_path: VirtualPath::new(row.get::<_, String>(2)?),
+                    trashed_at: row.get(3)?,
+                    origin_id: OriginId(row.get(4)?),
+                })
+            })
+            .map_err(|e| Error::Database(format!("query failed: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(files)
+    }
+
+    pub fn get_trashed_by_prefix(&self, prefix: &str) -> Result<Vec<TrashedFile>> {
+        self.list_trashed(&TrashedFilter {
+            path_prefix: Some(prefix.to_string()),
+            ..Default::default()
+        })
+    }
+
+    pub fn is_trashed(&self, path: &VirtualPath) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE virtual_path = ?1 AND trashed = 1",
+                params![path.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(|e| Error::Database(format!("is_trashed query failed: {}", e)))?;
+        Ok(count > 0)
+    }
+
+    pub fn purge_trashed(&self, filter: &TrashedFilter) -> Result<u64> {
+        let trashed = self.list_trashed(filter)?;
+        let count = trashed.len() as u64;
+
+        let conn = self.conn.lock().unwrap();
+        for file in trashed {
+            conn.execute("DELETE FROM files WHERE id = ?1", params![file.file_id.0])
+                .map_err(|e| Error::Database(format!("purge delete failed: {}", e)))?;
+        }
+
+        debug!(count, "purged trashed files");
+        Ok(count)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TrashedFile {
+    pub file_id: FileId,
+    pub current_path: VirtualPath,
+    pub original_path: VirtualPath,
+    pub trashed_at: i64,
+    pub origin_id: OriginId,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TrashedFilter {
+    pub origin_id: Option<OriginId>,
+    pub path_prefix: Option<String>,
+    pub since: Option<Duration>,
 }
 
 fn parse_audio_format(s: &str) -> AudioFormat {
@@ -781,5 +925,125 @@ mod tests {
 
         let files = db.get_files_by_prefix("/Other/").unwrap();
         assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn test_mark_trashed() {
+        let db = Database::open_memory().unwrap();
+
+        let id = db
+            .upsert_file(
+                &OriginId::from("local"),
+                Path::new("/test.flac"),
+                &VirtualPath::new("/Artist/Track.flac"),
+                &AudioMeta::default(),
+                UNIX_EPOCH,
+                100,
+            )
+            .unwrap();
+
+        db.mark_trashed(id, &VirtualPath::new("/Artist/Track.flac"))
+            .unwrap();
+
+        let trashed = db.list_trashed(&TrashedFilter::default()).unwrap();
+        assert_eq!(trashed.len(), 1);
+        assert_eq!(trashed[0].original_path.as_str(), "/Artist/Track.flac");
+    }
+
+    #[test]
+    fn test_unmark_trashed() {
+        let db = Database::open_memory().unwrap();
+
+        let id = db
+            .upsert_file(
+                &OriginId::from("local"),
+                Path::new("/test.flac"),
+                &VirtualPath::new("/Artist/Track.flac"),
+                &AudioMeta::default(),
+                UNIX_EPOCH,
+                100,
+            )
+            .unwrap();
+
+        db.mark_trashed(id, &VirtualPath::new("/Artist/Track.flac"))
+            .unwrap();
+        assert_eq!(db.list_trashed(&TrashedFilter::default()).unwrap().len(), 1);
+
+        db.unmark_trashed(id).unwrap();
+        assert_eq!(db.list_trashed(&TrashedFilter::default()).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_list_trashed_with_filter() {
+        let db = Database::open_memory().unwrap();
+        let origin1 = OriginId::from("local1");
+        let origin2 = OriginId::from("local2");
+
+        let id1 = db
+            .upsert_file(
+                &origin1,
+                Path::new("/a.flac"),
+                &VirtualPath::new("/Artist1/Track.flac"),
+                &AudioMeta::default(),
+                UNIX_EPOCH,
+                100,
+            )
+            .unwrap();
+
+        let id2 = db
+            .upsert_file(
+                &origin2,
+                Path::new("/b.flac"),
+                &VirtualPath::new("/Artist2/Track.flac"),
+                &AudioMeta::default(),
+                UNIX_EPOCH,
+                100,
+            )
+            .unwrap();
+
+        db.mark_trashed(id1, &VirtualPath::new("/Artist1/Track.flac"))
+            .unwrap();
+        db.mark_trashed(id2, &VirtualPath::new("/Artist2/Track.flac"))
+            .unwrap();
+
+        let all = db.list_trashed(&TrashedFilter::default()).unwrap();
+        assert_eq!(all.len(), 2);
+
+        let filtered = db
+            .list_trashed(&TrashedFilter {
+                origin_id: Some(origin1.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].origin_id, origin1);
+
+        let by_path = db.get_trashed_by_prefix("/Artist1").unwrap();
+        assert_eq!(by_path.len(), 1);
+    }
+
+    #[test]
+    fn test_purge_trashed() {
+        let db = Database::open_memory().unwrap();
+
+        let id = db
+            .upsert_file(
+                &OriginId::from("local"),
+                Path::new("/test.flac"),
+                &VirtualPath::new("/Track.flac"),
+                &AudioMeta::default(),
+                UNIX_EPOCH,
+                100,
+            )
+            .unwrap();
+
+        db.mark_trashed(id, &VirtualPath::new("/Track.flac"))
+            .unwrap();
+        assert_eq!(db.list_trashed(&TrashedFilter::default()).unwrap().len(), 1);
+
+        let count = db.purge_trashed(&TrashedFilter::default()).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(db.list_trashed(&TrashedFilter::default()).unwrap().len(), 0);
+        assert_eq!(db.file_count().unwrap(), 0);
     }
 }

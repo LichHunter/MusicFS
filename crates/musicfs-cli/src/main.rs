@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use musicfs_cache::{Database, TreeBuilder};
+use musicfs_cache::{Database, RenameError, TrashedFilter, TreeBuilder, VirtualTree};
 use musicfs_cas::{CasConfig, CasStore, ContentFetcher, FileReader};
 use musicfs_core::{FileId, FileMeta, LoggingConfig, OriginId, RealPath, VirtualPath};
 use musicfs_fuse::MusicFs;
@@ -66,6 +66,14 @@ enum Commands {
         #[arg(short, long, default_value = "30")]
         timeout: u32,
     },
+    Trash {
+        #[arg(short, long, help = "Config file path")]
+        config: Option<PathBuf>,
+        #[arg(short = 'd', long, help = "Cache directory")]
+        cache_dir: Option<PathBuf>,
+        #[command(subcommand)]
+        command: TrashCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -86,6 +94,30 @@ enum OriginCommands {
     List,
     Health { origin_id: String },
     Rescan { origin_id: String },
+}
+
+#[derive(Subcommand)]
+enum TrashCommands {
+    List {
+        #[arg(long, help = "Filter by origin")]
+        origin: Option<String>,
+        #[arg(long, help = "Show files deleted within duration (e.g., 7d, 24h)")]
+        since: Option<String>,
+        #[arg(long, help = "Filter by path prefix")]
+        path: Option<String>,
+    },
+    Restore {
+        #[arg(help = "Path to restore (restores folder recursively)")]
+        path: Option<String>,
+        #[arg(long, help = "Restore all deleted files")]
+        all: bool,
+    },
+    Empty {
+        #[arg(long, help = "Delete files older than duration (e.g., 30d)")]
+        older_than: Option<String>,
+        #[arg(long, help = "Delete files matching pattern")]
+        pattern: Option<String>,
+    },
 }
 
 struct LockFile {
@@ -194,6 +226,14 @@ fn main() -> Result<()> {
         Commands::Shutdown { graceful, timeout } => {
             init_basic_logging(&cli.log_level);
             run_shutdown(graceful, timeout)
+        }
+        Commands::Trash {
+            config,
+            cache_dir,
+            command,
+        } => {
+            init_basic_logging(&cli.log_level);
+            run_trash(config, cache_dir, command)
         }
     }
 }
@@ -307,6 +347,14 @@ fn run_mount(config: musicfs_core::Config) -> Result<()> {
         .context("Failed to acquire lock — is another instance running?")?;
     info!(lock_path = ?lock_path, "Lock acquired");
 
+    let pid_path = config.cache_dir.join("musicfs.pid");
+    std::fs::write(&pid_path, std::process::id().to_string())
+        .context("Failed to write PID file")?;
+    info!(pid_path = ?pid_path, "PID file written");
+
+    let tree_for_restore = tree.clone();
+    let db_for_restore = db.clone();
+
     let fs = MusicFs::with_reader(tree, reader, handle.clone()).with_db(db);
 
     info!("Mounting filesystem at {:?}", config.mount_point);
@@ -329,13 +377,22 @@ fn run_mount(config: musicfs_core::Config) -> Result<()> {
         let mut sigterm =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+        let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
 
-        tokio::select! {
-            _ = sigterm.recv() => {
-                info!("Received SIGTERM, shutting down");
-            }
-            _ = sigint.recv() => {
-                info!("Received SIGINT, shutting down");
+        loop {
+            tokio::select! {
+                _ = sigterm.recv() => {
+                    info!("Received SIGTERM, shutting down");
+                    break;
+                }
+                _ = sigint.recv() => {
+                    info!("Received SIGINT, shutting down");
+                    break;
+                }
+                _ = sighup.recv() => {
+                    info!("Received SIGHUP, processing pending restores");
+                    process_pending_restores(&tree_for_restore, &db_for_restore);
+                }
             }
         }
 
@@ -355,6 +412,8 @@ fn run_mount(config: musicfs_core::Config) -> Result<()> {
     }
     info!("Unmounting filesystem");
     drop(session);
+
+    let _ = std::fs::remove_file(&pid_path);
     info!("Shutdown complete");
 
     Ok(())
@@ -420,6 +479,254 @@ fn run_shutdown(graceful: bool, timeout: u32) -> Result<()> {
     );
     println!("gRPC client integration pending");
     Ok(())
+}
+
+fn run_trash(
+    config: Option<PathBuf>,
+    cache_dir: Option<PathBuf>,
+    command: TrashCommands,
+) -> Result<()> {
+    let cache_dir = if let Some(dir) = cache_dir {
+        dir
+    } else if let Some(cfg_path) = config {
+        let content = std::fs::read_to_string(&cfg_path).context("Failed to read config file")?;
+        let config: Value = toml::from_str(&content).context("Failed to parse config file")?;
+        PathBuf::from(
+            config
+                .get("cache_dir")
+                .and_then(|v| v.as_str())
+                .context("cache_dir not found in config")?,
+        )
+    } else {
+        return Err(anyhow::anyhow!(
+            "Either --config or --cache-dir must be provided"
+        ));
+    };
+
+    let db_path = cache_dir.join("musicfs.db");
+    let db = Database::open(&db_path).context("Failed to open database")?;
+
+    match command {
+        TrashCommands::List {
+            origin,
+            since,
+            path,
+        } => {
+            let filter = TrashedFilter {
+                origin_id: origin.map(|s| OriginId::from(s.as_str())),
+                path_prefix: path,
+                since: since.and_then(|s| parse_duration(&s)),
+            };
+
+            let trashed = db.list_trashed(&filter)?;
+
+            if trashed.is_empty() {
+                println!("No deleted files found.");
+                return Ok(());
+            }
+
+            println!("{:<6} {:<20} PATH", "IDX", "DELETED");
+            println!("{}", "-".repeat(80));
+
+            for (i, file) in trashed.iter().enumerate() {
+                let ago = format_time_ago(file.trashed_at);
+                println!("{:<6} {:<20} {}", i, ago, file.original_path.as_str());
+            }
+
+            println!("\nTotal: {} deleted files", trashed.len());
+        }
+        TrashCommands::Restore { path, all } => {
+            let trashed = if all {
+                db.list_trashed(&TrashedFilter::default())?
+            } else if let Some(ref p) = path {
+                db.get_trashed_by_prefix(p)?
+            } else {
+                return Err(anyhow::anyhow!("Either --all or a path must be provided"));
+            };
+
+            if trashed.is_empty() {
+                println!("No files to restore.");
+                return Ok(());
+            }
+
+            let restore_file = cache_dir.join("pending_restore.txt");
+            let paths: Vec<String> = trashed
+                .iter()
+                .map(|f| f.original_path.as_str().to_string())
+                .collect();
+            std::fs::write(&restore_file, paths.join("\n"))?;
+
+            let pid_path = cache_dir.join("musicfs.pid");
+            if pid_path.exists() {
+                let pid_str = std::fs::read_to_string(&pid_path)?;
+                let pid: i32 = pid_str.trim().parse().context("Invalid PID in pid file")?;
+
+                std::env::set_var("MUSICFS_RESTORE_FILE", &restore_file);
+
+                unsafe {
+                    libc::kill(pid, libc::SIGHUP);
+                }
+                println!("Restore signal sent for {} files.", trashed.len());
+                println!("Files will appear at their original locations.");
+            } else {
+                println!(
+                    "Daemon not running. Marked {} files for restore.",
+                    trashed.len()
+                );
+                println!("Start the daemon to complete restore, or restore manually with 'mv'.");
+            }
+        }
+        TrashCommands::Empty {
+            older_than,
+            pattern,
+        } => {
+            let filter = TrashedFilter {
+                since: older_than.and_then(|s| parse_duration(&s)),
+                path_prefix: pattern,
+                ..Default::default()
+            };
+
+            let count = db.purge_trashed(&filter)?;
+            println!("Permanently deleted {} files from trash.", count);
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_duration(s: &str) -> Option<std::time::Duration> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    let (num_str, unit) = if s.ends_with('d') {
+        (&s[..s.len() - 1], 'd')
+    } else if s.ends_with('h') {
+        (&s[..s.len() - 1], 'h')
+    } else if s.ends_with('m') {
+        (&s[..s.len() - 1], 'm')
+    } else if s.ends_with('s') {
+        (&s[..s.len() - 1], 's')
+    } else {
+        return None;
+    };
+
+    let num: u64 = num_str.parse().ok()?;
+    let secs = match unit {
+        'd' => num * 86400,
+        'h' => num * 3600,
+        'm' => num * 60,
+        's' => num,
+        _ => return None,
+    };
+
+    Some(std::time::Duration::from_secs(secs))
+}
+
+fn format_time_ago(timestamp: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    let diff = now - timestamp;
+    if diff < 60 {
+        format!("{}s ago", diff)
+    } else if diff < 3600 {
+        format!("{}m ago", diff / 60)
+    } else if diff < 86400 {
+        format!("{}h ago", diff / 3600)
+    } else {
+        format!("{}d ago", diff / 86400)
+    }
+}
+
+fn process_pending_restores(tree: &Arc<RwLock<VirtualTree>>, db: &Arc<Database>) {
+    let restore_file = match std::env::var("MUSICFS_RESTORE_FILE") {
+        Ok(path) => PathBuf::from(path),
+        Err(_) => {
+            debug!("MUSICFS_RESTORE_FILE not set, no restores to process");
+            return;
+        }
+    };
+
+    let restore_paths: Vec<String> = match std::fs::read_to_string(&restore_file) {
+        Ok(content) => content.lines().map(|s| s.to_string()).collect(),
+        Err(e) => {
+            warn!(error = %e, path = ?restore_file, "failed to read restore file");
+            return;
+        }
+    };
+
+    if restore_paths.is_empty() {
+        debug!("no paths to restore");
+        return;
+    }
+
+    let trashed = match db.list_trashed(&TrashedFilter::default()) {
+        Ok(files) => files,
+        Err(e) => {
+            warn!(error = %e, "failed to list trashed files");
+            return;
+        }
+    };
+
+    let mut restored = 0;
+    for original_path_str in &restore_paths {
+        let matching: Vec<_> = trashed
+            .iter()
+            .filter(|f| {
+                f.original_path.as_str() == original_path_str
+                    || f.original_path
+                        .as_str()
+                        .starts_with(&format!("{}/", original_path_str))
+            })
+            .collect();
+
+        for file in matching {
+            let parent_path = std::path::Path::new(file.original_path.as_str())
+                .parent()
+                .map(|p| {
+                    let s = p.to_string_lossy();
+                    if s.is_empty() {
+                        VirtualPath::new("/")
+                    } else {
+                        VirtualPath::new(s.into_owned())
+                    }
+                })
+                .unwrap_or_else(|| VirtualPath::new("/"));
+
+            let mut tree_guard = tree.write();
+
+            if let Err(e) = tree_guard.mkdir_p(&parent_path) {
+                if !matches!(e, RenameError::TargetExists) {
+                    warn!(error = ?e, path = %parent_path.as_str(), "failed to create parent for restore");
+                    continue;
+                }
+            }
+
+            if let Err(e) = tree_guard.rename_file(&file.current_path, &file.original_path) {
+                warn!(error = ?e, from = %file.current_path.as_str(), to = %file.original_path.as_str(), "failed to restore file");
+                continue;
+            }
+
+            drop(tree_guard);
+
+            if let Err(e) = db.update_virtual_path(file.file_id, &file.original_path) {
+                warn!(error = %e, "failed to update virtual path after restore");
+            }
+            if let Err(e) = db.unmark_trashed(file.file_id) {
+                warn!(error = %e, "failed to unmark trashed after restore");
+            }
+
+            restored += 1;
+            info!(path = %file.original_path.as_str(), "restored file from trash");
+        }
+    }
+
+    let _ = std::fs::remove_file(&restore_file);
+    info!(count = restored, "restore complete");
 }
 
 fn init_logging(config: &LoggingConfig) -> Result<WorkerGuard> {

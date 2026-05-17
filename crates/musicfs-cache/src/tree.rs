@@ -571,6 +571,207 @@ impl VirtualTree {
         );
         Ok(count)
     }
+
+    pub fn is_trash_path(path: &VirtualPath) -> bool {
+        path.as_str().starts_with("/.trash") || path.as_str() == "/.trash"
+    }
+
+    pub fn ensure_trash_dir(&mut self) -> Inode {
+        let trash_path = VirtualPath::new("/.trash");
+        if let Some(&inode) = self.path_to_inode.get(&trash_path) {
+            return inode;
+        }
+
+        let inode = self.alloc_inode();
+        let dir_node = DirNode {
+            inode,
+            parent: ROOT_INODE,
+            name: OsString::from(".trash"),
+            children: BTreeMap::new(),
+            mtime: SystemTime::now(),
+        };
+
+        self.nodes.insert(inode, VirtualNode::Directory(dir_node));
+        self.path_to_inode.insert(trash_path, inode);
+
+        if let Some(VirtualNode::Directory(root)) = self.nodes.get_mut(&ROOT_INODE) {
+            root.children.insert(OsString::from(".trash"), inode);
+        }
+
+        debug!(inode, "created .trash directory");
+        inode
+    }
+
+    pub fn mkdir_p(&mut self, path: &VirtualPath) -> std::result::Result<Inode, RenameError> {
+        if let Some(&existing) = self.path_to_inode.get(path) {
+            if self
+                .nodes
+                .get(&existing)
+                .map(|n| n.is_dir())
+                .unwrap_or(false)
+            {
+                return Ok(existing);
+            }
+            return Err(RenameError::TargetExists);
+        }
+
+        let components: Vec<&str> = path
+            .as_str()
+            .trim_start_matches('/')
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let mut current_inode = ROOT_INODE;
+        let mut current_path = String::from("/");
+
+        for component in &components {
+            if !current_path.ends_with('/') {
+                current_path.push('/');
+            }
+            current_path.push_str(component);
+
+            let vpath = VirtualPath::new(&current_path);
+
+            if let Some(&existing) = self.path_to_inode.get(&vpath) {
+                current_inode = existing;
+            } else {
+                let new_inode = self.alloc_inode();
+                let name = OsString::from(*component);
+
+                let dir_node = DirNode {
+                    inode: new_inode,
+                    parent: current_inode,
+                    name: name.clone(),
+                    children: BTreeMap::new(),
+                    mtime: SystemTime::now(),
+                };
+
+                self.nodes
+                    .insert(new_inode, VirtualNode::Directory(dir_node));
+                self.path_to_inode.insert(vpath, new_inode);
+
+                if let Some(VirtualNode::Directory(parent)) = self.nodes.get_mut(&current_inode) {
+                    parent.children.insert(name, new_inode);
+                }
+
+                current_inode = new_inode;
+            }
+        }
+
+        Ok(current_inode)
+    }
+
+    pub fn remove_directory(&mut self, path: &VirtualPath) -> std::result::Result<(), RemoveError> {
+        let inode = self
+            .path_to_inode
+            .get(path)
+            .copied()
+            .ok_or(RemoveError::NotFound)?;
+
+        let node = self.nodes.get(&inode).ok_or(RemoveError::NotFound)?;
+
+        match node {
+            VirtualNode::File(_) => return Err(RemoveError::NotDirectory),
+            VirtualNode::Directory(dir) => {
+                if !dir.children.is_empty() {
+                    return Err(RemoveError::NotEmpty);
+                }
+            }
+        }
+
+        let parent_path = std::path::Path::new(path.as_str())
+            .parent()
+            .map(|p| VirtualPath::new(p.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| VirtualPath::new("/"));
+
+        if let Some(&parent_inode) = self.path_to_inode.get(&parent_path) {
+            if let Some(VirtualNode::Directory(parent)) = self.nodes.get_mut(&parent_inode) {
+                let name = std::path::Path::new(path.as_str())
+                    .file_name()
+                    .map(|n| n.to_os_string())
+                    .unwrap_or_default();
+                parent.children.remove(&name);
+            }
+        }
+
+        self.path_to_inode.remove(path);
+        self.nodes.remove(&inode);
+
+        debug!(path = path.as_str(), inode, "removed directory");
+        Ok(())
+    }
+
+    pub fn remove_directory_recursive(
+        &mut self,
+        path: &VirtualPath,
+    ) -> std::result::Result<Vec<FileId>, RemoveError> {
+        let inode = self
+            .path_to_inode
+            .get(path)
+            .copied()
+            .ok_or(RemoveError::NotFound)?;
+
+        if !self.nodes.get(&inode).map(|n| n.is_dir()).unwrap_or(false) {
+            return Err(RemoveError::NotDirectory);
+        }
+
+        let prefix = path.as_str();
+        let paths_to_remove: Vec<(VirtualPath, Inode)> = self
+            .path_to_inode
+            .iter()
+            .filter(|(p, _)| p.as_str().starts_with(prefix))
+            .map(|(p, &i)| (p.clone(), i))
+            .collect();
+
+        let mut removed_files = Vec::new();
+
+        for (p, ino) in &paths_to_remove {
+            if let Some(VirtualNode::File(f)) = self.nodes.get(ino) {
+                removed_files.push(f.file_id);
+            }
+            self.path_to_inode.remove(p);
+            self.nodes.remove(ino);
+        }
+
+        let parent_path = std::path::Path::new(path.as_str())
+            .parent()
+            .map(|p| VirtualPath::new(p.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| VirtualPath::new("/"));
+
+        if let Some(&parent_inode) = self.path_to_inode.get(&parent_path) {
+            if let Some(VirtualNode::Directory(parent)) = self.nodes.get_mut(&parent_inode) {
+                let name = std::path::Path::new(path.as_str())
+                    .file_name()
+                    .map(|n| n.to_os_string())
+                    .unwrap_or_default();
+                parent.children.remove(&name);
+            }
+        }
+
+        debug!(
+            path = path.as_str(),
+            file_count = removed_files.len(),
+            "removed directory recursively"
+        );
+        Ok(removed_files)
+    }
+
+    pub fn is_directory_empty(&self, path: &VirtualPath) -> Option<bool> {
+        let inode = self.path_to_inode.get(path)?;
+        if let Some(VirtualNode::Directory(dir)) = self.nodes.get(inode) {
+            Some(dir.children.is_empty())
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoveError {
+    NotFound,
+    NotEmpty,
+    NotDirectory,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -888,5 +1089,136 @@ mod tests {
         let result = tree.mkdir(&VirtualPath::new("/Existing"));
 
         assert_eq!(result, Err(RenameError::TargetExists));
+    }
+
+    #[test]
+    fn test_is_trash_path() {
+        assert!(VirtualTree::is_trash_path(&VirtualPath::new("/.trash")));
+        assert!(VirtualTree::is_trash_path(&VirtualPath::new(
+            "/.trash/Artist/Track.flac"
+        )));
+        assert!(!VirtualTree::is_trash_path(&VirtualPath::new(
+            "/Artist/Track.flac"
+        )));
+        assert!(!VirtualTree::is_trash_path(&VirtualPath::new(
+            "/trash/Artist/Track.flac"
+        )));
+    }
+
+    #[test]
+    fn test_ensure_trash_dir() {
+        let mut tree = VirtualTree::new();
+
+        assert!(tree.get_by_path(&VirtualPath::new("/.trash")).is_none());
+
+        let inode = tree.ensure_trash_dir();
+        assert!(inode > ROOT_INODE);
+
+        let node = tree.get_by_path(&VirtualPath::new("/.trash"));
+        assert!(node.is_some());
+        assert!(node.unwrap().is_dir());
+
+        let inode2 = tree.ensure_trash_dir();
+        assert_eq!(inode, inode2);
+    }
+
+    #[test]
+    fn test_mkdir_p() {
+        let mut tree = VirtualTree::new();
+
+        tree.mkdir_p(&VirtualPath::new("/A/B/C/D")).unwrap();
+
+        assert!(tree.get_by_path(&VirtualPath::new("/A")).is_some());
+        assert!(tree.get_by_path(&VirtualPath::new("/A/B")).is_some());
+        assert!(tree.get_by_path(&VirtualPath::new("/A/B/C")).is_some());
+        assert!(tree.get_by_path(&VirtualPath::new("/A/B/C/D")).is_some());
+    }
+
+    #[test]
+    fn test_mkdir_p_partial_exists() {
+        let mut tree = VirtualTree::new();
+
+        tree.mkdir(&VirtualPath::new("/A")).unwrap();
+        tree.mkdir(&VirtualPath::new("/A/B")).unwrap();
+
+        tree.mkdir_p(&VirtualPath::new("/A/B/C/D")).unwrap();
+
+        assert!(tree.get_by_path(&VirtualPath::new("/A/B/C")).is_some());
+        assert!(tree.get_by_path(&VirtualPath::new("/A/B/C/D")).is_some());
+    }
+
+    #[test]
+    fn test_remove_directory_empty() {
+        let mut tree = VirtualTree::new();
+
+        tree.mkdir(&VirtualPath::new("/EmptyDir")).unwrap();
+        assert!(tree.get_by_path(&VirtualPath::new("/EmptyDir")).is_some());
+
+        tree.remove_directory(&VirtualPath::new("/EmptyDir"))
+            .unwrap();
+        assert!(tree.get_by_path(&VirtualPath::new("/EmptyDir")).is_none());
+    }
+
+    #[test]
+    fn test_remove_directory_not_empty() {
+        let mut tree = VirtualTree::new();
+        tree.insert_file(&make_file_meta(1, "/Artist/Track.flac"));
+
+        let result = tree.remove_directory(&VirtualPath::new("/Artist"));
+        assert_eq!(result, Err(RemoveError::NotEmpty));
+    }
+
+    #[test]
+    fn test_remove_directory_not_found() {
+        let mut tree = VirtualTree::new();
+
+        let result = tree.remove_directory(&VirtualPath::new("/NonExistent"));
+        assert_eq!(result, Err(RemoveError::NotFound));
+    }
+
+    #[test]
+    fn test_remove_directory_is_file() {
+        let mut tree = VirtualTree::new();
+        tree.insert_file(&make_file_meta(1, "/Track.flac"));
+
+        let result = tree.remove_directory(&VirtualPath::new("/Track.flac"));
+        assert_eq!(result, Err(RemoveError::NotDirectory));
+    }
+
+    #[test]
+    fn test_remove_directory_recursive() {
+        let mut tree = VirtualTree::new();
+        tree.insert_file(&make_file_meta(1, "/Artist/Album/Track1.flac"));
+        tree.insert_file(&make_file_meta(2, "/Artist/Album/Track2.flac"));
+        tree.insert_file(&make_file_meta(3, "/Artist/Other/Track3.flac"));
+
+        let removed = tree
+            .remove_directory_recursive(&VirtualPath::new("/Artist"))
+            .unwrap();
+
+        assert_eq!(removed.len(), 3);
+        assert!(tree.get_by_path(&VirtualPath::new("/Artist")).is_none());
+    }
+
+    #[test]
+    fn test_is_directory_empty() {
+        let mut tree = VirtualTree::new();
+
+        tree.mkdir(&VirtualPath::new("/Empty")).unwrap();
+        assert_eq!(
+            tree.is_directory_empty(&VirtualPath::new("/Empty")),
+            Some(true)
+        );
+
+        tree.insert_file(&make_file_meta(1, "/NonEmpty/Track.flac"));
+        assert_eq!(
+            tree.is_directory_empty(&VirtualPath::new("/NonEmpty")),
+            Some(false)
+        );
+
+        assert_eq!(
+            tree.is_directory_empty(&VirtualPath::new("/NonExistent")),
+            None
+        );
     }
 }

@@ -27,6 +27,10 @@ CREATE TABLE IF NOT EXISTS files (
     chunk_manifest  BLOB,
     last_sync       INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
     
+    trashed         INTEGER NOT NULL DEFAULT 0,
+    original_path   TEXT,
+    trashed_at      INTEGER,
+    
     UNIQUE(origin_id, real_path)
 );
 
@@ -64,3 +68,4 @@ CREATE TABLE IF NOT EXISTS directories (
 );
 
 CREATE INDEX IF NOT EXISTS idx_directories_path ON directories(path);
+CREATE INDEX IF NOT EXISTS idx_files_trashed ON files(trashed) WHERE trashed = 1;
