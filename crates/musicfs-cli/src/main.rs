@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use metadata::MetadataCommand;
 use musicfs_cache::{
-    Database, FlacHandler, FormatHandlerRegistry, FormatLayout, Id3v2Handler, RenameError,
-    TrashedFilter, TreeBuilder, VirtualTree,
+    Database, FlacHandler, FormatHandlerRegistry, FormatLayout, Id3v2Handler, OverlayReader,
+    RenameError, TrashedFilter, TreeBuilder, VirtualTree,
 };
 use musicfs_cas::{CasConfig, CasStore, ContentFetcher, FileReader};
 use musicfs_core::{FileId, FileMeta, LoggingConfig, OriginId, RealPath, VirtualPath};
@@ -263,7 +263,7 @@ fn run_mount(config: musicfs_core::Config) -> Result<()> {
     let runtime = tokio::runtime::Runtime::new().context("Failed to create Tokio runtime")?;
     let handle = runtime.handle().clone();
 
-    let (tree, reader, db) = runtime.block_on(async {
+    let (tree, reader, db, overlay_reader) = runtime.block_on(async {
         info!(mountpoint = ?config.mount_point, "Mount configuration");
         info!("Cache directory: {:?}", config.cache_dir);
 
@@ -364,9 +364,16 @@ fn run_mount(config: musicfs_core::Config) -> Result<()> {
 
         let tree = Arc::new(RwLock::new(tree));
 
-        let reader = Arc::new(FileReader::with_fetcher(store, fetcher));
+        let reader = Arc::new(FileReader::with_fetcher(store.clone(), fetcher));
 
-        Ok::<_, anyhow::Error>((tree, reader, db))
+        // Create overlay reader for metadata synthesis
+        let overlay_reader = Arc::new(OverlayReader::new(
+            db.clone(),
+            format_registry,
+            reader.clone(),
+        ));
+
+        Ok::<_, anyhow::Error>((tree, reader, db, overlay_reader))
     })?;
 
     check_stale_mount(&config.mount_point)?;
@@ -384,7 +391,9 @@ fn run_mount(config: musicfs_core::Config) -> Result<()> {
     let tree_for_restore = tree.clone();
     let db_for_restore = db.clone();
 
-    let fs = MusicFs::with_reader(tree, reader, handle.clone()).with_db(db);
+    let fs = MusicFs::with_reader(tree, reader, handle.clone())
+        .with_db(db)
+        .with_overlay(overlay_reader);
 
     info!("Mounting filesystem at {:?}", config.mount_point);
 
