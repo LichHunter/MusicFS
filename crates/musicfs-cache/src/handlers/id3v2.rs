@@ -1,7 +1,9 @@
 use crate::{FormatError, FormatHandler, FormatLayout};
 use lofty::config::{ParseOptions, WriteOptions};
 use lofty::file::AudioFile;
-use lofty::id3::v2::{CommentFrame, Frame, FrameId, Id3v2Tag, TextInformationFrame, UnsynchronizedTextFrame};
+use lofty::id3::v2::{
+    CommentFrame, Frame, FrameId, Id3v2Tag, TextInformationFrame, UnsynchronizedTextFrame,
+};
 use lofty::mpeg::MpegFile;
 use lofty::tag::{Accessor, TagExt};
 use lofty::TextEncoding;
@@ -55,7 +57,12 @@ impl Id3v2Handler {
         tag.insert(frame);
     }
 
-    fn set_track_disc_frame(tag: &mut Id3v2Tag, frame_id: &'static str, num: u32, total: Option<u32>) {
+    fn set_track_disc_frame(
+        tag: &mut Id3v2Tag,
+        frame_id: &'static str,
+        num: u32,
+        total: Option<u32>,
+    ) {
         let value = match total {
             Some(t) => format!("{}/{}", num, t),
             None => num.to_string(),
@@ -145,7 +152,10 @@ impl Id3v2Handler {
         }
 
         if let Some(ref mb_recording_id) = metadata.mb_recording_id {
-            tag.insert_user_text("MusicBrainz Recording Id".to_string(), mb_recording_id.clone());
+            tag.insert_user_text(
+                "MusicBrainz Recording Id".to_string(),
+                mb_recording_id.clone(),
+            );
         }
         if let Some(ref mb_album_id) = metadata.mb_album_id {
             tag.insert_user_text("MusicBrainz Album Id".to_string(), mb_album_id.clone());
@@ -266,7 +276,9 @@ impl Id3v2Handler {
         meta.album_sort = Self::extract_text_frame(tag, "TSOA");
         meta.album_artist_sort = Self::extract_text_frame(tag, "TSO2");
 
-        meta.mb_recording_id = tag.get_user_text("MusicBrainz Recording Id").map(String::from);
+        meta.mb_recording_id = tag
+            .get_user_text("MusicBrainz Recording Id")
+            .map(String::from);
         meta.mb_album_id = tag.get_user_text("MusicBrainz Album Id").map(String::from);
         meta.mb_artist_id = tag.get_user_text("MusicBrainz Artist Id").map(String::from);
         meta.mb_album_artist_id = tag
@@ -477,9 +489,7 @@ mod tests {
     fn test_analyze_with_id3v2() {
         let handler = Id3v2Handler::new();
 
-        let mut data = vec![
-            b'I', b'D', b'3', 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64,
-        ];
+        let mut data = vec![b'I', b'D', b'3', 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64];
         data.extend(vec![0u8; 100]);
         let file_size = data.len() as u64;
 
@@ -600,7 +610,10 @@ mod tests {
         assert_eq!(extracted.mb_recording_id, original_meta.mb_recording_id);
         assert_eq!(extracted.mb_album_id, original_meta.mb_album_id);
         assert_eq!(extracted.mb_artist_id, original_meta.mb_artist_id);
-        assert_eq!(extracted.mb_album_artist_id, original_meta.mb_album_artist_id);
+        assert_eq!(
+            extracted.mb_album_artist_id,
+            original_meta.mb_album_artist_id
+        );
         assert_eq!(
             extracted.mb_release_group_id,
             original_meta.mb_release_group_id

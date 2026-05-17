@@ -57,7 +57,12 @@ impl MetadataParser {
                 }
             }
 
+            if let Some(channels) = params.channels {
+                audio_meta.channels = Some(channels.count() as u32);
+            }
+
             if let Some(bits_per_sample) = params.bits_per_sample {
+                audio_meta.bits_per_sample = Some(bits_per_sample);
                 if let Some(sample_rate) = params.sample_rate {
                     if let Some(channels) = params.channels {
                         audio_meta.bitrate =
@@ -82,25 +87,97 @@ impl MetadataParser {
             if let Some(std_key) = tag.std_key {
                 let value = tag.value.to_string();
                 match std_key {
+                    // Basic metadata
                     StandardTagKey::TrackTitle => meta.title = Some(value),
                     StandardTagKey::Artist => meta.artist = Some(value),
                     StandardTagKey::Album => meta.album = Some(value),
                     StandardTagKey::AlbumArtist => meta.album_artist = Some(value),
                     StandardTagKey::Genre => meta.genre = Some(value),
+
+                    // Track/disc with totals (parse "X/Y" format)
                     StandardTagKey::TrackNumber => {
-                        meta.track = value.split('/').next().and_then(|s| s.parse().ok());
+                        let parts: Vec<&str> = value.split('/').collect();
+                        meta.track = parts.first().and_then(|s| s.trim().parse().ok());
+                        if parts.len() > 1 {
+                            meta.track_total = parts.get(1).and_then(|s| s.trim().parse().ok());
+                        }
                     }
                     StandardTagKey::DiscNumber => {
-                        meta.disc = value.split('/').next().and_then(|s| s.parse().ok());
+                        let parts: Vec<&str> = value.split('/').collect();
+                        meta.disc = parts.first().and_then(|s| s.trim().parse().ok());
+                        if parts.len() > 1 {
+                            meta.disc_total = parts.get(1).and_then(|s| s.trim().parse().ok());
+                        }
                     }
+                    StandardTagKey::TrackTotal => {
+                        meta.track_total = value.trim().parse().ok();
+                    }
+                    StandardTagKey::DiscTotal => {
+                        meta.disc_total = value.trim().parse().ok();
+                    }
+
+                    // Date handling: store full date string, extract year
                     StandardTagKey::Date | StandardTagKey::ReleaseDate => {
+                        meta.date = Some(value.clone());
                         meta.year = value.chars().take(4).collect::<String>().parse().ok();
                     }
+
+                    // Additional metadata
+                    StandardTagKey::Composer => meta.composer = Some(value),
+                    StandardTagKey::Comment => meta.comment = Some(value),
+                    StandardTagKey::Lyrics => meta.lyrics = Some(value),
+                    StandardTagKey::Copyright => meta.copyright = Some(value),
+                    StandardTagKey::Compilation => {
+                        meta.compilation = Some(value == "1" || value.eq_ignore_ascii_case("true"));
+                    }
+                    StandardTagKey::Encoder => meta.encoder = Some(value),
+
+                    // Sort keys
+                    StandardTagKey::SortTrackTitle => meta.title_sort = Some(value),
+                    StandardTagKey::SortArtist => meta.artist_sort = Some(value),
+                    StandardTagKey::SortAlbum => meta.album_sort = Some(value),
+                    StandardTagKey::SortAlbumArtist => meta.album_artist_sort = Some(value),
+
+                    // MusicBrainz IDs
+                    StandardTagKey::MusicBrainzRecordingId => meta.mb_recording_id = Some(value),
+                    StandardTagKey::MusicBrainzAlbumId => meta.mb_album_id = Some(value),
+                    StandardTagKey::MusicBrainzArtistId => meta.mb_artist_id = Some(value),
+                    StandardTagKey::MusicBrainzAlbumArtistId => {
+                        meta.mb_album_artist_id = Some(value)
+                    }
+                    StandardTagKey::MusicBrainzReleaseGroupId => {
+                        meta.mb_release_group_id = Some(value)
+                    }
+
+                    // ReplayGain (parse as f32, values may have "dB" suffix)
+                    StandardTagKey::ReplayGainTrackGain => {
+                        meta.replaygain_track_gain = parse_replaygain(&value);
+                    }
+                    StandardTagKey::ReplayGainTrackPeak => {
+                        meta.replaygain_track_peak = value.trim().parse().ok();
+                    }
+                    StandardTagKey::ReplayGainAlbumGain => {
+                        meta.replaygain_album_gain = parse_replaygain(&value);
+                    }
+                    StandardTagKey::ReplayGainAlbumPeak => {
+                        meta.replaygain_album_peak = value.trim().parse().ok();
+                    }
+
                     _ => {}
                 }
             }
         }
     }
+}
+
+/// Parse ReplayGain value, stripping optional "dB" suffix
+fn parse_replaygain(value: &str) -> Option<f32> {
+    let trimmed = value.trim();
+    let without_db = trimmed
+        .strip_suffix("dB")
+        .or_else(|| trimmed.strip_suffix(" dB"))
+        .unwrap_or(trimmed);
+    without_db.trim().parse().ok()
 }
 
 impl Default for MetadataParser {

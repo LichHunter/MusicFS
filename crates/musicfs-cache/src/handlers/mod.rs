@@ -5,6 +5,8 @@
 //! - Synthesizing new headers from database metadata
 //! - Extracting metadata from existing files
 
+mod flac;
 mod id3v2;
 
+pub use flac::FlacHandler;
 pub use id3v2::Id3v2Handler;
