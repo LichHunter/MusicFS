@@ -31,6 +31,15 @@
             clippy = pkgs.clippy;
           };
         };
+        embedme = {
+          enable = true;
+          name = "embedme";
+          description = "Keep README code blocks in sync with source files";
+          entry = "${pkgs.nodePackages.embedme}/bin/embedme";
+          args = [ "README.md" ];
+          pass_filenames = false;
+          language = "system";
+        };
       };
     };
   in {
@@ -73,6 +82,8 @@
 
         protobuf
         grpcurl
+
+        nodePackages.embedme
       ];
     };
   });
