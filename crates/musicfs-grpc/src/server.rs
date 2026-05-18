@@ -529,7 +529,10 @@ mod tests {
         let store = Arc::new(musicfs_cas::CasStore::open(cfg).await.unwrap());
         let fetcher = Arc::new(musicfs_cas::ContentFetcher::new(store));
         let origin_root = std::path::PathBuf::from("/tmp/test-origin");
-        (MusicFsServer::new(event_bus, db, tree, fetcher, origin_root), dir)
+        (
+            MusicFsServer::new(event_bus, db, tree, fetcher, origin_root),
+            dir,
+        )
     }
 
     #[tokio::test]

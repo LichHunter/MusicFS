@@ -786,11 +786,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn update_enrichment(
-        &self,
-        file_id: FileId,
-        enrichment: &EnrichmentUpdate,
-    ) -> Result<()> {
+    pub fn update_enrichment(&self, file_id: FileId, enrichment: &EnrichmentUpdate) -> Result<()> {
         let conn = self.conn.lock().unwrap();
 
         let mut set_clauses = vec![

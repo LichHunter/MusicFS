@@ -1,6 +1,8 @@
 use musicfs_cache::{Database, VirtualTree};
 use musicfs_cas::ContentFetcher;
-use musicfs_core::{AudioMeta, Error, Event, EventBus, FileId, FileMeta, OriginId, RealPath, Result, VirtualPath};
+use musicfs_core::{
+    AudioMeta, Error, Event, EventBus, FileId, FileMeta, OriginId, RealPath, Result, VirtualPath,
+};
 use musicfs_metadata::MetadataParser;
 use parking_lot::RwLock;
 use std::path::{Path, PathBuf};
@@ -101,9 +103,7 @@ impl OriginScanner {
                 continue;
             }
 
-            let size = std::fs::metadata(abs_path)
-                .map(|m| m.len())
-                .unwrap_or(0);
+            let size = std::fs::metadata(abs_path).map(|m| m.len()).unwrap_or(0);
 
             new_files.push(DiscoveredFile {
                 abs_path: abs_path.clone(),
